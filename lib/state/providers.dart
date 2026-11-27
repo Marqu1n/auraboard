@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:auraboard/audio/session_resilience.dart';
 import 'package:auraboard/audio/soloud_audio_engine.dart';
 import 'package:auraboard/data/audio_file_store.dart';
 import 'package:auraboard/data/backup_service.dart';
@@ -79,6 +80,125 @@ final backupServiceProvider = Provider<BackupService>((ref) {
 /// Provides the [FilePickerGateway] used for audio import and backup transfer.
 final filePickerGatewayProvider = Provider<FilePickerGateway>((ref) {
   return const PlatformFilePickerGateway();
+});
+
+/// Provides the platform [AudioFocusGateway] for audio focus and interruptions.
+final audioFocusGatewayProvider = Provider<AudioFocusGateway>((ref) {
+  return PlatformAudioFocusGateway();
+});
+
+/// Provides the platform [BackgroundServiceGateway] for OS media notifications.
+final backgroundServiceGatewayProvider = Provider<BackgroundServiceGateway>((
+  ref,
+) {
+  var isDisposed = false;
+  ref.onDispose(() {
+    isDisposed = true;
+  });
+  return PlatformBackgroundServiceGateway(
+    onStopAll: () async {
+      if (!isDisposed) {
+        await ref.read(playbackControllerProvider.notifier).stopAll();
+      }
+    },
+  );
+});
+
+/// Provides the platform [WakelockGateway] for keeping the screen awake.
+final wakelockGatewayProvider = Provider<WakelockGateway>((ref) {
+  return const PlatformWakelockGateway();
+});
+
+/// Coordinates OS audio focus, interruption pause/resume, foreground media
+/// service notifications, and keep-screen-awake wakelock during live sessions.
+final sessionResilienceProvider = Provider<SessionResilienceCoordinator>((ref) {
+  final audioFocus = ref.watch(audioFocusGatewayProvider);
+  final backgroundService = ref.watch(backgroundServiceGatewayProvider);
+  final wakelock = ref.watch(wakelockGatewayProvider);
+
+  var isDisposed = false;
+  final coordinator = SessionResilienceCoordinator(
+    audioFocusGateway: audioFocus,
+    backgroundServiceGateway: backgroundService,
+    wakelockGateway: wakelock,
+    onPauseForInterruption: () async {
+      if (!isDisposed) {
+        await ref
+            .read(playbackControllerProvider.notifier)
+            .pauseForInterruption();
+      }
+    },
+    onResumeAfterInterruption: () async {
+      if (!isDisposed) {
+        await ref
+            .read(playbackControllerProvider.notifier)
+            .resumeAfterInterruption();
+      }
+    },
+  );
+
+  Map<String, SoundPad> currentPadsById() {
+    final library = ref.read(libraryControllerProvider).asData?.value;
+    if (library == null) {
+      return const <String, SoundPad>{};
+    }
+    return <String, SoundPad>{for (final pad in library.pads) pad.id: pad};
+  }
+
+  final initialLibrary = ref.read(libraryControllerProvider).asData?.value;
+  unawaited(
+    coordinator.initialize(
+      keepScreenAwake: initialLibrary?.settings.keepScreenAwake ?? false,
+    ),
+  );
+
+  ref.listen<AsyncValue<SoundLibrary>>(libraryControllerProvider, (
+    previous,
+    next,
+  ) {
+    if (isDisposed) {
+      return;
+    }
+    final nextLibrary = next.asData?.value;
+    if (nextLibrary == null) {
+      return;
+    }
+    final prevLibrary = previous?.asData?.value;
+    if (prevLibrary == null ||
+        prevLibrary.settings.keepScreenAwake !=
+            nextLibrary.settings.keepScreenAwake) {
+      unawaited(
+        coordinator.setKeepScreenAwake(nextLibrary.settings.keepScreenAwake),
+      );
+    }
+    if (prevLibrary != null && prevLibrary.pads != nextLibrary.pads) {
+      final playbackState = ref.read(playbackControllerProvider);
+      if (playbackState.activeByPad.isNotEmpty) {
+        unawaited(
+          coordinator.syncPlaybackState(
+            playbackState,
+            padsById: <String, SoundPad>{
+              for (final pad in nextLibrary.pads) pad.id: pad,
+            },
+          ),
+        );
+      }
+    }
+  });
+
+  ref.listen<PlaybackState>(playbackControllerProvider, (previous, next) {
+    if (isDisposed) {
+      return;
+    }
+    unawaited(coordinator.syncPlaybackState(next, padsById: currentPadsById()));
+  });
+
+  ref.onDispose(() {
+    isDisposed = true;
+    unawaited(coordinator.dispose());
+  });
+
+  return coordinator;
 });
 
 /// Controls whether the soundboard is in explicit Edit Mode (`true`) or safe

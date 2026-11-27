@@ -307,6 +307,23 @@ class _SettingsSheetState extends ConsumerState<SettingsSheet> {
               },
             ),
             const Divider(height: 24),
+            Text('Session', style: theme.textTheme.titleMedium),
+            const SizedBox(height: 4),
+            SwitchListTile(
+              key: const Key('keep_screen_awake_switch'),
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Keep screen awake'),
+              subtitle: const Text(
+                'Prevent the screen from dimming or locking during sessions.',
+              ),
+              value: settings.keepScreenAwake,
+              onChanged: (enabled) {
+                controller.updateSettings(
+                  settings.copyWith(keepScreenAwake: enabled),
+                );
+              },
+            ),
+            const Divider(height: 24),
             Text(
               'Backup & Transfer (Offline)',
               style: theme.textTheme.titleMedium,

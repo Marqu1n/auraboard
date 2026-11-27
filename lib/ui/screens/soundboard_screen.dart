@@ -85,6 +85,7 @@ class _SoundboardScreenState extends ConsumerState<SoundboardScreen> {
 
   @override
   Widget build(BuildContext context) {
+    ref.watch(sessionResilienceProvider);
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
     final libraryAsync = ref.watch(libraryControllerProvider);

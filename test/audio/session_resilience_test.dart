@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:auraboard/audio/session_resilience.dart';
 import 'package:auraboard/domain/models.dart';
 import 'package:auraboard/domain/playback_engine.dart';
@@ -407,5 +409,236 @@ void main() {
         expect(resumeCount, 0);
       },
     );
+
+    test(
+      'serializes overlapping syncPlaybackState calls (playing -> idle and 1 -> 2 pads)',
+      () async {
+        final gate = Completer<void>();
+        final audioFocus = _GatedAudioFocusGateway(setActiveGate: gate);
+        final backgroundService = FakeBackgroundServiceGateway();
+        final wakelock = FakeWakelockGateway();
+        addTearDown(audioFocus.closeStream);
+
+        final coordinator = SessionResilienceCoordinator(
+          audioFocusGateway: audioFocus,
+          backgroundServiceGateway: backgroundService,
+          wakelockGateway: wakelock,
+          onPauseForInterruption: () async {},
+          onResumeAfterInterruption: () async {},
+        );
+        addTearDown(coordinator.dispose);
+
+        await coordinator.initialize(keepScreenAwake: false);
+
+        final f1 = coordinator.syncPlaybackState(
+          PlaybackState(
+            activeByPad: <String, ActiveVoiceState>{
+              _battleDrumsPad.id: const ActiveVoiceState(
+                padId: 'pad_battle_drums',
+                phase: PadPlaybackPhase.playing,
+              ),
+            },
+          ),
+          padsById: _testPadsById,
+        );
+        final f2 = coordinator.syncPlaybackState(
+          PlaybackState(
+            activeByPad: <String, ActiveVoiceState>{
+              _battleDrumsPad.id: const ActiveVoiceState(
+                padId: 'pad_battle_drums',
+                phase: PadPlaybackPhase.playing,
+              ),
+              _steadyRainPad.id: const ActiveVoiceState(
+                padId: 'pad_steady_rain',
+                phase: PadPlaybackPhase.playing,
+              ),
+            },
+          ),
+          padsById: _testPadsById,
+        );
+        final f3 = coordinator.syncPlaybackState(
+          const PlaybackState(),
+          padsById: _testPadsById,
+        );
+
+        gate.complete();
+        await Future.wait<void>(<Future<void>>[f1, f2, f3]);
+
+        expect(audioFocus.activeHistory.last, isFalse);
+        expect(backgroundService.updates.last.isPlaying, isFalse);
+        expect(backgroundService.updates.last.activeCount, 0);
+      },
+    );
+
+    test(
+      'handles unknown focus loss (Android permanent loss & iOS shouldResume) without wedging future calls',
+      () async {
+        final audioFocus = FakeAudioFocusGateway();
+        final backgroundService = FakeBackgroundServiceGateway();
+        final wakelock = FakeWakelockGateway();
+        addTearDown(audioFocus.closeStream);
+
+        var pauseCount = 0;
+        var resumeCount = 0;
+
+        final coordinator = SessionResilienceCoordinator(
+          audioFocusGateway: audioFocus,
+          backgroundServiceGateway: backgroundService,
+          wakelockGateway: wakelock,
+          onPauseForInterruption: () async => pauseCount += 1,
+          onResumeAfterInterruption: () async => resumeCount += 1,
+        );
+        addTearDown(coordinator.dispose);
+
+        await coordinator.initialize(keepScreenAwake: false);
+
+        // Case 1: unknown begin -> unknown end pauses without auto-resuming.
+        audioFocus.emitInterruption(
+          const SessionInterruptionEvent(
+            begin: true,
+            kind: AudioInterruptionKind.unknown,
+          ),
+        );
+        await pumpEventQueue();
+        expect(pauseCount, 1);
+        audioFocus.emitInterruption(
+          const SessionInterruptionEvent(
+            begin: false,
+            kind: AudioInterruptionKind.unknown,
+          ),
+        );
+        await pumpEventQueue();
+        expect(resumeCount, 0);
+
+        // Case 2: iOS-style unknown begin -> pause end pauses and resumes.
+        audioFocus.emitInterruption(
+          const SessionInterruptionEvent(
+            begin: true,
+            kind: AudioInterruptionKind.unknown,
+          ),
+        );
+        await pumpEventQueue();
+        expect(pauseCount, 2);
+        audioFocus.emitInterruption(
+          const SessionInterruptionEvent(
+            begin: false,
+            kind: AudioInterruptionKind.pause,
+          ),
+        );
+        await pumpEventQueue();
+        expect(resumeCount, 1);
+
+        // Case 3: Android permanent AUDIOFOCUS_LOSS (begin=true, unknown with
+        // no matching end) -> user stops & restarts playback -> next phone call
+        // must still pause and resume cleanly.
+        await coordinator.syncPlaybackState(
+          PlaybackState(
+            activeByPad: <String, ActiveVoiceState>{
+              _battleDrumsPad.id: const ActiveVoiceState(
+                padId: 'pad_battle_drums',
+                phase: PadPlaybackPhase.playing,
+              ),
+            },
+          ),
+          padsById: _testPadsById,
+        );
+        audioFocus.emitInterruption(
+          const SessionInterruptionEvent(
+            begin: true,
+            kind: AudioInterruptionKind.unknown,
+          ),
+        );
+        await pumpEventQueue();
+        expect(pauseCount, 3);
+
+        await coordinator.syncPlaybackState(
+          const PlaybackState(),
+          padsById: _testPadsById,
+        );
+        await coordinator.syncPlaybackState(
+          PlaybackState(
+            activeByPad: <String, ActiveVoiceState>{
+              _battleDrumsPad.id: const ActiveVoiceState(
+                padId: 'pad_battle_drums',
+                phase: PadPlaybackPhase.playing,
+              ),
+            },
+          ),
+          padsById: _testPadsById,
+        );
+
+        audioFocus.emitInterruption(
+          const SessionInterruptionEvent(
+            begin: true,
+            kind: AudioInterruptionKind.pause,
+          ),
+        );
+        await pumpEventQueue();
+        expect(pauseCount, 4);
+
+        audioFocus.emitInterruption(
+          const SessionInterruptionEvent(
+            begin: false,
+            kind: AudioInterruptionKind.pause,
+          ),
+        );
+        await pumpEventQueue();
+        expect(resumeCount, 2);
+      },
+    );
+
+    test(
+      'setKeepScreenAwake(true) arriving during async initialize(false) is not clobbered',
+      () async {
+        final configGate = Completer<void>();
+        final audioFocus = _GatedAudioFocusGateway(configureGate: configGate);
+        final backgroundService = FakeBackgroundServiceGateway();
+        final wakelock = FakeWakelockGateway();
+        addTearDown(audioFocus.closeStream);
+
+        final coordinator = SessionResilienceCoordinator(
+          audioFocusGateway: audioFocus,
+          backgroundServiceGateway: backgroundService,
+          wakelockGateway: wakelock,
+          onPauseForInterruption: () async {},
+          onResumeAfterInterruption: () async {},
+        );
+        addTearDown(coordinator.dispose);
+
+        final initFuture = coordinator.initialize(keepScreenAwake: false);
+        await coordinator.setKeepScreenAwake(true);
+        configGate.complete();
+        await initFuture;
+
+        expect(wakelock.lastEnabled, isTrue);
+      },
+    );
   });
+}
+
+class _GatedAudioFocusGateway extends FakeAudioFocusGateway {
+  _GatedAudioFocusGateway({this.configureGate, this.setActiveGate});
+
+  Completer<void>? configureGate;
+  Completer<void>? setActiveGate;
+
+  @override
+  Future<void> configureForMediaPlayback() async {
+    final gate = configureGate;
+    if (gate != null && !gate.isCompleted) {
+      configureGate = null;
+      await gate.future;
+    }
+    await super.configureForMediaPlayback();
+  }
+
+  @override
+  Future<bool> setActive(bool active) async {
+    final gate = setActiveGate;
+    if (gate != null && !gate.isCompleted) {
+      setActiveGate = null;
+      await gate.future;
+    }
+    return super.setActive(active);
+  }
 }
