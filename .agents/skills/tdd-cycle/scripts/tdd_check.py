@@ -80,6 +80,8 @@ def check_domain_purity(root: Path) -> list[str]:
         return []
     forbidden = (
         "package:flutter/",
+        "package:material_ui/",
+        "package:flutter_riverpod/",
         "package:flutter_soloud/",
         "package:audio_service/",
         "package:audio_session/",

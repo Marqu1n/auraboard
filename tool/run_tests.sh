@@ -17,7 +17,7 @@ if [[ -d "$HOME/Android/Sdk" ]]; then
   export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-$HOME/Android/Sdk}"
   export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/emulator:$PATH"
   if ! command -v clang >/dev/null 2>&1; then
-    NDK_LLVM_BIN="$(find "$ANDROID_HOME/ndk" -maxdepth 4 -type d -path '*/toolchains/llvm/prebuilt/linux-x86_64/bin' 2>/dev/null | sort -V | tail -n 1 || true)"
+    NDK_LLVM_BIN="$(find "$ANDROID_HOME/ndk" -maxdepth 6 -type d -path '*/toolchains/llvm/prebuilt/linux-x86_64/bin' 2>/dev/null | sort -V | tail -n 1 || true)"
     if [[ -n "$NDK_LLVM_BIN" ]]; then
       export PATH="$NDK_LLVM_BIN:$PATH"
     fi
