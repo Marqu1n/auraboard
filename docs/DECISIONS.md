@@ -21,3 +21,9 @@ Concise log of stack choices and ambiguity resolutions, each favoring mid-sessio
 
 - **Material 3 import (`package:material_ui/material_ui.dart`)**: Flutter 3.50.1 deprecates `package:flutter/material.dart` in favor of `material_ui`, so UI files import `material_ui` directly to stay zero-info clean under `flutter analyze --fatal-infos`.
 - **Linux test-host native compiler fallback (`tool/run_tests.sh`)**: `flutter_soloud ^5.4.0` uses Dart native build hooks requiring `clang` on Linux host during `flutter test`; `tool/run_tests.sh` automatically falls back to Android NDK's bundled `clang` when system `clang` is not installed.
+
+## Phase 2 — Playback Domain & Audio Engine
+
+- **Effect retrigger vs. loop toggle**: Tapping an active Music or Ambience pad always fades it out and stops it; tapping an active Effect pad executes its configured `RetriggerMode` (`restart` stops the active voice and replays from 0:00; `layer` overlaps a new voice) so a GM can fire rapid back-to-back SFX, while explicit `stopPad()` (exposed via the Now Playing bar) or `stopAll()` stops any active Effect immediately (or via its per-pad fade-out override).
+- **`PlaybackState` lives in `lib/domain/`**: Moved `PlaybackState` alongside `PlaybackEngine` in pure Dart so domain, state, and UI share one immutable state snapshot without circular dependencies.
+- **`SoLoudBridge` seam**: `SoLoudAudioEngine` delegates native calls through a thin `SoLoudBridge` interface backed by `SoLoud.instance` in production, enabling deterministic unit testing of caching, clamping, handle lifecycle, and error wrapping without audio hardware.
