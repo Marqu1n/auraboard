@@ -1,3 +1,4 @@
+import 'package:auraboard/data/backup_service.dart';
 import 'package:auraboard/domain/models.dart';
 import 'package:auraboard/state/providers.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -15,13 +16,149 @@ Future<void> showSettingsSheet(BuildContext context) {
 }
 
 /// Scrollable Material 3 settings sheet for theme, dynamic color, grid density,
-/// and global default fade/crossfade durations.
-class SettingsSheet extends ConsumerWidget {
+/// global default fade/crossfade durations, and offline backup transfer.
+class SettingsSheet extends ConsumerStatefulWidget {
   const SettingsSheet({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<SettingsSheet> createState() => _SettingsSheetState();
+}
+
+class _SettingsSheetState extends ConsumerState<SettingsSheet> {
+  bool _isBackupBusy = false;
+
+  Future<void> _handleExportBackup() async {
+    if (_isBackupBusy) {
+      return;
+    }
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    setState(() => _isBackupBusy = true);
+    try {
+      final bytes = await ref
+          .read(libraryControllerProvider.notifier)
+          .exportBackup();
+      final saved = await ref
+          .read(filePickerGatewayProvider)
+          .saveBackupBytes(
+            suggestedFileName: 'auraboard_backup.auraboard',
+            bytes: bytes,
+          );
+      if (!mounted) {
+        return;
+      }
+      messenger
+        ?..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(
+            content: Text(
+              saved
+                  ? 'Backup exported successfully.'
+                  : 'Backup export canceled.',
+            ),
+          ),
+        );
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      messenger
+        ?..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(content: Text('Backup export failed: $error')));
+    } finally {
+      if (mounted) {
+        setState(() => _isBackupBusy = false);
+      }
+    }
+  }
+
+  Future<void> _handleImportBackup() async {
+    if (_isBackupBusy) {
+      return;
+    }
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    final colorScheme = Theme.of(context).colorScheme;
+    setState(() => _isBackupBusy = true);
+    try {
+      final archiveBytes = await ref
+          .read(filePickerGatewayProvider)
+          .pickBackupBytes();
+      if (archiveBytes == null || !mounted) {
+        return;
+      }
+
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('Restore backup?'),
+          content: const Text(
+            'Importing this backup will stop all playing audio and replace '
+            'your current folders, pads, and settings.',
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              key: const Key('confirm_import_backup'),
+              style: FilledButton.styleFrom(
+                backgroundColor: colorScheme.error,
+                foregroundColor: colorScheme.onError,
+              ),
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: const Text('Restore'),
+            ),
+          ],
+        ),
+      );
+
+      if (confirmed != true || !mounted) {
+        return;
+      }
+
+      // Validate and restore backup BEFORE stopping playback so corrupt or
+      // invalid archives never interrupt an active session.
+      await ref
+          .read(libraryControllerProvider.notifier)
+          .importBackup(archiveBytes);
+      if (mounted) {
+        await ref.read(playbackControllerProvider.notifier).stopAll();
+      }
+      if (!mounted) {
+        return;
+      }
+      messenger
+        ?..hideCurrentSnackBar()
+        ..showSnackBar(
+          const SnackBar(content: Text('Backup restored successfully.')),
+        );
+    } on BackupException catch (error) {
+      if (!mounted) {
+        return;
+      }
+      messenger
+        ?..hideCurrentSnackBar()
+        ..showSnackBar(
+          SnackBar(content: Text('Backup import failed: ${error.message}')),
+        );
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      messenger
+        ?..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(content: Text('Backup import failed: $error')));
+    } finally {
+      if (mounted) {
+        setState(() => _isBackupBusy = false);
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
     final libraryAsync = ref.watch(libraryControllerProvider);
     final settings =
         libraryAsync.asData?.value.settings ?? const BoardSettings();
@@ -168,6 +305,46 @@ class SettingsSheet extends ConsumerWidget {
                   settings.copyWith(defaultCrossfadeMs: ms),
                 );
               },
+            ),
+            const Divider(height: 24),
+            Text(
+              'Backup & Transfer (Offline)',
+              style: theme.textTheme.titleMedium,
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Export or restore your board and imported audio as a single offline file.',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: colorScheme.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: 12),
+            FilledButton.tonalIcon(
+              key: const Key('export_backup_button'),
+              style: FilledButton.styleFrom(
+                minimumSize: const Size(48, 48),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 12,
+                ),
+              ),
+              onPressed: _isBackupBusy ? null : _handleExportBackup,
+              icon: const Icon(Icons.file_upload_outlined),
+              label: const Text('Export backup'),
+            ),
+            const SizedBox(height: 10),
+            OutlinedButton.icon(
+              key: const Key('import_backup_button'),
+              style: OutlinedButton.styleFrom(
+                minimumSize: const Size(48, 48),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 12,
+                ),
+              ),
+              onPressed: _isBackupBusy ? null : _handleImportBackup,
+              icon: const Icon(Icons.file_download_outlined),
+              label: const Text('Import backup'),
             ),
           ],
         ),

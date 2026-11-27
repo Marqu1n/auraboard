@@ -1,6 +1,11 @@
 import 'dart:async';
+import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:auraboard/audio/soloud_audio_engine.dart';
+import 'package:auraboard/data/audio_file_store.dart';
+import 'package:auraboard/data/backup_service.dart';
+import 'package:auraboard/data/file_picker_gateway.dart';
 import 'package:auraboard/data/library_repository.dart';
 import 'package:auraboard/domain/audio_engine.dart';
 import 'package:auraboard/domain/clock.dart';
@@ -13,6 +18,34 @@ import 'package:uuid/uuid.dart';
 export 'package:auraboard/domain/playback_engine.dart' show PlaybackState;
 
 const Uuid _uuid = Uuid();
+
+const List<int> _importedPadColorPalette = <int>[
+  0xFFB84A39,
+  0xFFD96B27,
+  0xFFC68A32,
+  0xFF3A7D44,
+  0xFF6A4C93,
+  0xFF3E6D8C,
+  0xFF4F5D75,
+  0xFF9C3D3D,
+  0xFFD4A738,
+  0xFF2A7B76,
+  0xFF43509C,
+  0xFF7A4465,
+];
+
+/// Summary of an offline multi-file audio import operation.
+class ImportAudioResult {
+  const ImportAudioResult({
+    required this.importedCount,
+    required this.skippedCount,
+    required this.importedPads,
+  });
+
+  final int importedCount;
+  final int skippedCount;
+  final List<SoundPad> importedPads;
+}
 
 /// Provides the active [AudioEngine] implementation.
 final audioEngineProvider = Provider<AudioEngine>((ref) {
@@ -31,6 +64,21 @@ final clockProvider = Provider<Clock>((ref) {
 /// Provides the [LibraryRepository] for loading and persisting board data.
 final libraryRepositoryProvider = Provider<LibraryRepository>((ref) {
   return InMemoryLibraryRepository();
+});
+
+/// Provides the app-private [AudioFileStore] for imported user audio files.
+final audioFileStoreProvider = Provider<AudioFileStore>((ref) {
+  return AudioFileStore(baseDirectory: Directory.systemTemp);
+});
+
+/// Provides the offline [BackupService] for `.auraboard` ZIP export/import.
+final backupServiceProvider = Provider<BackupService>((ref) {
+  return BackupService(audioFileStore: ref.watch(audioFileStoreProvider));
+});
+
+/// Provides the [FilePickerGateway] used for audio import and backup transfer.
+final filePickerGatewayProvider = Provider<FilePickerGateway>((ref) {
+  return const PlatformFilePickerGateway();
 });
 
 /// Controls whether the soundboard is in explicit Edit Mode (`true`) or safe
@@ -115,18 +163,30 @@ class LibraryController extends AsyncNotifier<SoundLibrary> {
 
   /// Deletes [folderId] (optionally moving its pads to [movePadsToFolderId])
   /// and persists the library. Any deleted active pads are automatically
-  /// stopped by [PlaybackController] observing library updates.
+  /// stopped by [PlaybackController] observing library updates, and unreferenced
+  /// private audio files are removed from disk.
   Future<void> deleteFolder(
     String folderId, {
     String? movePadsToFolderId,
   }) async {
-    await _mutate(
+    final before = state.asData?.value ?? await future;
+    final after = await _mutate(
       (library) => LibraryOperations.deleteFolder(
         library,
         folderId: folderId,
         movePadsToFolderId: movePadsToFolderId,
       ),
     );
+    if (movePadsToFolderId == null) {
+      final deletedPaths = before.pads
+          .where((pad) => pad.folderId == folderId && !pad.isAsset)
+          .map((pad) => pad.audioPath)
+          .toSet();
+      await _deleteUnreferencedPrivateFiles(
+        candidatePaths: deletedPaths,
+        remainingLibrary: after,
+      );
+    }
   }
 
   /// Reorders pads within [folderId] and persists.
@@ -165,14 +225,192 @@ class LibraryController extends AsyncNotifier<SoundLibrary> {
   }
 
   /// Removes [padId] from the library and persists. [PlaybackController]
-  /// automatically stops playback if the deleted pad is currently active.
+  /// automatically stops playback if the deleted pad is currently active, and
+  /// removes the private audio file if no remaining pad references it.
   Future<void> deletePad(String padId) async {
-    await _mutate((current) => LibraryOperations.deletePad(current, padId));
+    final before = state.asData?.value ?? await future;
+    SoundPad? deletedPad;
+    for (final pad in before.pads) {
+      if (pad.id == padId) {
+        deletedPad = pad;
+        break;
+      }
+    }
+    final after = await _mutate(
+      (current) => LibraryOperations.deletePad(current, padId),
+    );
+    if (deletedPad != null && !deletedPad.isAsset) {
+      await _deleteUnreferencedPrivateFiles(
+        candidatePaths: <String>{deletedPad.audioPath},
+        remainingLibrary: after,
+      );
+    }
   }
 
   /// Appends [pads] to their respective folders and persists.
   Future<void> addPads(List<SoundPad> pads) async {
     await _mutate((current) => LibraryOperations.addPads(current, pads));
+  }
+
+  /// Imports user-selected [files] into app-private storage and appends new
+  /// pads to [folderId]. Unsupported or unreadable files are skipped gracefully.
+  Future<ImportAudioResult> importAudioFiles({
+    required String folderId,
+    required List<PickedAudioFile> files,
+  }) async {
+    if (files.isEmpty) {
+      return const ImportAudioResult(
+        importedCount: 0,
+        skippedCount: 0,
+        importedPads: <SoundPad>[],
+      );
+    }
+
+    final current = state.asData?.value ?? await future;
+    if (current.folders.isEmpty) {
+      return ImportAudioResult(
+        importedCount: 0,
+        skippedCount: files.length,
+        importedPads: const <SoundPad>[],
+      );
+    }
+
+    final targetFolderId =
+        current.folders.any((folder) => folder.id == folderId)
+        ? folderId
+        : current.folders.first.id;
+    final store = ref.read(audioFileStoreProvider);
+
+    final importedPads = <SoundPad>[];
+    var skippedCount = 0;
+    var colorIndex = current.pads.length;
+
+    for (final file in files) {
+      try {
+        final String storedPath;
+        final filePath = file.path;
+        final fileBytes = file.bytes;
+        if (filePath != null && filePath.isNotEmpty) {
+          storedPath = await store.copyToPrivateStorage(
+            sourcePath: filePath,
+            originalFileName: file.name,
+          );
+        } else if (fileBytes != null) {
+          storedPath = await store.writeBytesToPrivateStorage(
+            bytes: fileBytes,
+            originalFileName: file.name,
+          );
+        } else {
+          skippedCount++;
+          continue;
+        }
+
+        final labelSource = file.name.trim().isNotEmpty
+            ? file.name
+            : (filePath ?? '');
+        final label = store.derivePadLabel(labelSource);
+        final colorValue =
+            _importedPadColorPalette[colorIndex %
+                _importedPadColorPalette.length];
+        colorIndex++;
+
+        importedPads.add(
+          SoundPad(
+            id: 'pad_${_uuid.v4()}',
+            folderId: targetFolderId,
+            label: label,
+            colorValue: colorValue,
+            audioPath: storedPath,
+            isAsset: false,
+            type: PadType.effect,
+            order: 0,
+          ),
+        );
+      } catch (_) {
+        skippedCount++;
+      }
+    }
+
+    if (importedPads.isNotEmpty) {
+      await _mutate(
+        (library) => LibraryOperations.addPads(library, importedPads),
+      );
+    }
+
+    return ImportAudioResult(
+      importedCount: importedPads.length,
+      skippedCount: skippedCount,
+      importedPads: List<SoundPad>.unmodifiable(importedPads),
+    );
+  }
+
+  /// Exports the current [SoundLibrary] and all non-asset audio files as a
+  /// portable ZIP archive byte buffer.
+  Future<Uint8List> exportBackup() async {
+    final current = state.asData?.value ?? await future;
+    return ref.read(backupServiceProvider).exportBackup(current);
+  }
+
+  /// Validates and imports a backup archive, persists it to storage, and
+  /// replaces the current library state.
+  ///
+  /// Persists before mutating in-memory state and rolls back newly extracted
+  /// audio files if persistence fails. Callers stop active playback via
+  /// `playbackControllerProvider` after restore succeeds to preserve one-way
+  /// Riverpod dependencies (`PlaybackController -> LibraryController`) and
+  /// prevent invalid backups from disrupting live audio.
+  Future<SoundLibrary> importBackup(Uint8List archiveBytes) async {
+    final previous = state.asData?.value ?? await future;
+    final restored = await ref
+        .read(backupServiceProvider)
+        .importBackup(archiveBytes);
+
+    final oldPrivatePaths = previous.pads
+        .where((pad) => !pad.isAsset)
+        .map((pad) => pad.audioPath)
+        .toSet();
+    final newPrivatePaths = restored.pads
+        .where((pad) => !pad.isAsset)
+        .map((pad) => pad.audioPath)
+        .toSet();
+
+    try {
+      await ref.read(libraryRepositoryProvider).save(restored);
+    } catch (_) {
+      await _deleteUnreferencedPrivateFiles(
+        candidatePaths: newPrivatePaths,
+        remainingLibrary: previous,
+      );
+      rethrow;
+    }
+
+    state = AsyncData<SoundLibrary>(restored);
+
+    await _deleteUnreferencedPrivateFiles(
+      candidatePaths: oldPrivatePaths,
+      remainingLibrary: restored,
+    );
+
+    return restored;
+  }
+
+  Future<void> _deleteUnreferencedPrivateFiles({
+    required Set<String> candidatePaths,
+    required SoundLibrary remainingLibrary,
+  }) async {
+    if (candidatePaths.isEmpty) {
+      return;
+    }
+    final remainingPaths = remainingLibrary.pads
+        .where((pad) => !pad.isAsset)
+        .map((pad) => pad.audioPath)
+        .toSet();
+    final store = ref.read(audioFileStoreProvider);
+    for (final path in candidatePaths) {
+      if (!remainingPaths.contains(path)) {
+        await store.deletePrivateFile(path);
+      }
+    }
   }
 }
 

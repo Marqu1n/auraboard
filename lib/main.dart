@@ -1,4 +1,5 @@
 import 'package:auraboard/app.dart';
+import 'package:auraboard/data/audio_file_store.dart';
 import 'package:auraboard/data/file_library_repository.dart';
 import 'package:auraboard/state/providers.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -9,9 +10,13 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final supportDir = await getApplicationSupportDirectory();
   final repository = FileLibraryRepository(directory: supportDir);
+  final audioFileStore = AudioFileStore(baseDirectory: supportDir);
   runApp(
     ProviderScope(
-      overrides: [libraryRepositoryProvider.overrideWithValue(repository)],
+      overrides: [
+        libraryRepositoryProvider.overrideWithValue(repository),
+        audioFileStoreProvider.overrideWithValue(audioFileStore),
+      ],
       child: const AuraBoardApp(),
     ),
   );

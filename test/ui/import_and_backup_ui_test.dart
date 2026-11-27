@@ -21,12 +21,11 @@ class _FakeFilePickerGateway implements FilePickerGateway {
   _FakeFilePickerGateway({
     this.pickedAudioFiles = const <PickedAudioFile>[],
     this.backupBytesToPick,
-    this.saveResult = true,
   });
 
   List<PickedAudioFile> pickedAudioFiles;
   Uint8List? backupBytesToPick;
-  bool saveResult;
+  bool saveResult = true;
 
   String? savedFileName;
   Uint8List? savedBackupBytes;
@@ -46,6 +45,23 @@ class _FakeFilePickerGateway implements FilePickerGateway {
     savedBackupBytes = Uint8List.fromList(bytes);
     return saveResult;
   }
+}
+
+/// Pumps real `dart:io` async completions safely inside Flutter's FakeAsync
+/// widget-test zone without wall-clock `Future.delayed` sleeps.
+Future<void> _waitForDiskIo(
+  WidgetTester tester,
+  Future<bool> Function() predicate,
+) async {
+  for (var attempt = 0; attempt < 200; attempt++) {
+    if (await predicate()) {
+      await tester.pumpAndSettle();
+      return;
+    }
+    await tester.runAsync(() => Directory.systemTemp.exists());
+    await tester.pump();
+  }
+  await tester.pumpAndSettle();
 }
 
 Directory _createTempDir(String prefix) {
@@ -155,7 +171,12 @@ void main() {
         expect(importBtn, findsOneWidget);
 
         await tester.tap(importBtn);
-        await tester.pumpAndSettle();
+        await _waitForDiskIo(
+          tester,
+          () async => (await repository.load()).pads.any(
+            (p) => p.label == 'Goblin Laugh',
+          ),
+        );
 
         // Feedback SnackBar should be presented to the GM.
         expect(find.byType(SnackBar), findsOneWidget);
@@ -257,7 +278,12 @@ void main() {
         await tester.tap(find.byKey(const Key('edit_mode_toggle')));
         await tester.pumpAndSettle();
         await tester.tap(find.byKey(const Key('import_audio_button')));
-        await tester.pumpAndSettle();
+        await _waitForDiskIo(
+          tester,
+          () async => (await repository.load()).pads.any(
+            (p) => p.label == 'Broken Horn',
+          ),
+        );
 
         final library = await repository.load();
         final brokenPad = library.pads.firstWhere(
@@ -321,10 +347,12 @@ void main() {
         final dragonBytes = File(
           'test/fixtures/sample_effect.wav',
         ).readAsBytesSync();
-        final dragonPathA = await storeA.writeBytesToPrivateStorage(
-          bytes: dragonBytes,
-          originalFileName: 'dragon_breath.wav',
-        );
+        final dragonPathA = (await tester.runAsync(
+          () => storeA.writeBytesToPrivateStorage(
+            bytes: dragonBytes,
+            originalFileName: 'dragon_breath.wav',
+          ),
+        ))!;
 
         final demoBase = createDemoLibrary();
         final customLibraryA = demoBase.copyWith(
@@ -375,7 +403,10 @@ void main() {
         await tester.ensureVisible(exportBtn);
         await tester.pumpAndSettle();
         await tester.tap(exportBtn);
-        await tester.pumpAndSettle();
+        await _waitForDiskIo(
+          tester,
+          () async => pickerA.savedBackupBytes != null,
+        );
 
         expect(pickerA.savedBackupBytes, isNotNull);
         expect(pickerA.savedBackupBytes!, isNotEmpty);
@@ -409,6 +440,7 @@ void main() {
         await tester.tap(swordTile);
         await tester.pump();
         expect(fakeEngineB.activeHandles, isNotEmpty);
+        expect(fakeClockB.activeTimerCount, greaterThan(0));
 
         // Open Settings, tap Import Backup, and confirm overwrite.
         await tester.tap(find.byKey(const Key('settings_button')));
@@ -423,9 +455,17 @@ void main() {
         final confirmBtn = find.byKey(const Key('confirm_import_backup'));
         expect(confirmBtn, findsOneWidget);
         await tester.tap(confirmBtn);
-        await tester.pumpAndSettle();
+        await _waitForDiskIo(
+          tester,
+          () async => (await repositoryB.load()).folders.any(
+            (f) => f.name == 'Campaign Vault',
+          ),
+        );
 
-        // Active playback must have been stopped when restoring backup.
+        // Complete smooth stopAll fade-out on FakeClock and verify active
+        // playback has stopped.
+        fakeClockB.advance(const Duration(seconds: 3));
+        await tester.pump();
         expect(fakeEngineB.activeHandles, isEmpty);
 
         // Verify restored library on Device B includes custom folder & audio file.

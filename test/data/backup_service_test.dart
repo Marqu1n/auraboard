@@ -400,5 +400,61 @@ void main() {
         );
       },
     );
+
+    test(
+      'rolls back extracted audio files when archive is missing a referenced audio entry',
+      () async {
+        final deviceBDir = _createTempDir('auraboard_backup_rollback_');
+        final storeB = AudioFileStore(baseDirectory: deviceBDir);
+        final service = BackupService(audioFileStore: storeB);
+
+        const partialManifest = SoundLibrary(
+          folders: <SoundFolder>[
+            SoundFolder(id: 'f1', name: 'Combat', order: 0),
+          ],
+          pads: <SoundPad>[
+            SoundPad(
+              id: 'p_present',
+              folderId: 'f1',
+              label: 'Present Sound',
+              colorValue: 0xFFB84A39,
+              audioPath: 'audio/present.wav',
+              isAsset: false,
+              type: PadType.effect,
+              order: 0,
+            ),
+            SoundPad(
+              id: 'p_missing',
+              folderId: 'f1',
+              label: 'Missing Sound',
+              colorValue: 0xFF3E6D8C,
+              audioPath: 'audio/missing.wav',
+              isAsset: false,
+              type: PadType.effect,
+              order: 1,
+            ),
+          ],
+        );
+
+        final wavBytes = File(
+          'test/fixtures/sample_effect.wav',
+        ).readAsBytesSync();
+        final partialZip = _encodeZipEntries(<String, List<int>>{
+          'manifest.json': utf8.encode(jsonEncode(partialManifest.toJson())),
+          'audio/present.wav': wavBytes,
+        });
+
+        await expectLater(
+          () => service.importBackup(partialZip),
+          throwsA(isA<BackupException>()),
+        );
+
+        // Rollback must leave zero orphaned audio files on disk.
+        final remainingFiles = storeB.audioDirectory.existsSync()
+            ? storeB.audioDirectory.listSync().whereType<File>().toList()
+            : <File>[];
+        expect(remainingFiles, isEmpty);
+      },
+    );
   });
 }

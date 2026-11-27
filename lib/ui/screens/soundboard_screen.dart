@@ -20,6 +20,7 @@ class SoundboardScreen extends ConsumerStatefulWidget {
 
 class _SoundboardScreenState extends ConsumerState<SoundboardScreen> {
   String? _selectedFolderId;
+  bool _isImporting = false;
 
   Future<void> _handleAddFolder() async {
     final name = await showFolderNameDialog(
@@ -29,6 +30,56 @@ class _SoundboardScreenState extends ConsumerState<SoundboardScreen> {
     );
     if (name != null && mounted) {
       await ref.read(libraryControllerProvider.notifier).createFolder(name);
+    }
+  }
+
+  Future<void> _handleImportAudio(String folderId) async {
+    if (_isImporting) {
+      return;
+    }
+    _isImporting = true;
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    try {
+      final pickedFiles = await ref
+          .read(filePickerGatewayProvider)
+          .pickAudioFiles();
+      if (pickedFiles.isEmpty || !mounted) {
+        return;
+      }
+
+      final result = await ref
+          .read(libraryControllerProvider.notifier)
+          .importAudioFiles(folderId: folderId, files: pickedFiles);
+      if (!mounted) {
+        return;
+      }
+
+      final String message;
+      final soundWord = result.importedCount == 1 ? 'sound' : 'sounds';
+      if (result.importedCount > 0 && result.skippedCount > 0) {
+        message =
+            'Imported ${result.importedCount} $soundWord '
+            '(${result.skippedCount} skipped).';
+      } else if (result.importedCount > 0) {
+        message = 'Imported ${result.importedCount} $soundWord.';
+      } else {
+        message =
+            'No supported audio files imported '
+            '(${result.skippedCount} skipped).';
+      }
+
+      messenger
+        ?..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(content: Text(message)));
+    } catch (error) {
+      if (!mounted) {
+        return;
+      }
+      messenger
+        ?..hideCurrentSnackBar()
+        ..showSnackBar(SnackBar(content: Text('Audio import failed: $error')));
+    } finally {
+      _isImporting = false;
     }
   }
 
@@ -116,14 +167,23 @@ class _SoundboardScreenState extends ConsumerState<SoundboardScreen> {
           );
           final libraryNotifier = ref.read(libraryControllerProvider.notifier);
 
+          final effectiveFolderId = folders.isEmpty
+              ? null
+              : (folders.any((folder) => folder.id == _selectedFolderId)
+                    ? _selectedFolderId!
+                    : folders.first.id);
+
           final editModeBanner = isEditMode
               ? _EditModeBanner(
+                  onImportAudio: effectiveFolderId != null
+                      ? () => _handleImportAudio(effectiveFolderId)
+                      : null,
                   onAddFolder: _handleAddFolder,
                   onManageFolders: () => showFolderManagerSheet(context),
                 )
               : null;
 
-          if (folders.isEmpty) {
+          if (effectiveFolderId == null) {
             return Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: <Widget>[
@@ -142,11 +202,6 @@ class _SoundboardScreenState extends ConsumerState<SoundboardScreen> {
               ],
             );
           }
-
-          final effectiveFolderId =
-              folders.any((folder) => folder.id == _selectedFolderId)
-              ? _selectedFolderId!
-              : folders.first.id;
 
           final visiblePads =
               library.pads
@@ -323,10 +378,12 @@ class _SoundboardScreenState extends ConsumerState<SoundboardScreen> {
 
 class _EditModeBanner extends StatelessWidget {
   const _EditModeBanner({
+    required this.onImportAudio,
     required this.onAddFolder,
     required this.onManageFolders,
   });
 
+  final VoidCallback? onImportAudio;
   final VoidCallback onAddFolder;
   final VoidCallback onManageFolders;
 
@@ -363,6 +420,16 @@ class _EditModeBanner extends StatelessWidget {
                     color: colorScheme.onTertiaryContainer,
                   ),
                 ),
+              ),
+              IconButton(
+                key: const Key('import_audio_button'),
+                tooltip: 'Import audio files',
+                constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
+                icon: Icon(
+                  Icons.audio_file_outlined,
+                  color: colorScheme.onTertiaryContainer,
+                ),
+                onPressed: onImportAudio,
               ),
               IconButton(
                 key: const Key('add_folder_button'),

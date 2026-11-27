@@ -9,6 +9,9 @@ abstract interface class LibraryRepository {
 
 /// In-memory [LibraryRepository] that seeds the demo library on first load.
 class InMemoryLibraryRepository implements LibraryRepository {
+  InMemoryLibraryRepository({SoundLibrary? initialLibrary})
+    : _library = initialLibrary;
+
   SoundLibrary? _library;
 
   @override
