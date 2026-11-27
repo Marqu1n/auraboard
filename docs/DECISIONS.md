@@ -27,3 +27,9 @@ Concise log of stack choices and ambiguity resolutions, each favoring mid-sessio
 - **Effect retrigger vs. loop toggle**: Tapping an active Music or Ambience pad always fades it out and stops it; tapping an active Effect pad executes its configured `RetriggerMode` (`restart` stops the active voice and replays from 0:00; `layer` overlaps a new voice) so a GM can fire rapid back-to-back SFX, while explicit `stopPad()` (exposed via the Now Playing bar) or `stopAll()` stops any active Effect immediately (or via its per-pad fade-out override).
 - **`PlaybackState` lives in `lib/domain/`**: Moved `PlaybackState` alongside `PlaybackEngine` in pure Dart so domain, state, and UI share one immutable state snapshot without circular dependencies.
 - **`SoLoudBridge` seam**: `SoLoudAudioEngine` delegates native calls through a thin `SoLoudBridge` interface backed by `SoLoud.instance` in production, enabling deterministic unit testing of caching, clamping, handle lifecycle, and error wrapping without audio hardware.
+
+## Phase 4 — Organization, Persistence & Explicit Edit Mode
+
+- **Minimum one folder invariant**: `LibraryOperations.deleteFolder` refuses to delete the last remaining folder (`StateError`) so the board always has a valid folder for pads and imports; deleting a non-last folder offers moving its pads to another folder or removing them.
+- **Serialized atomic JSON persistence (`FileLibraryRepository`)**: Writes serialize through a chained future queue (`library.json.tmp` -> flush -> atomic rename) so rapid slider drags or reorders never race or corrupt storage; corrupt JSON is preserved in a `.corrupt` backup before falling back to the demo board.
+- **Optional pad icons**: `SoundPad.icon` is nullable (`PadIcon?`) so users can assign any of the 16 bundled Material icons or omit an icon in the Pad Editor.
