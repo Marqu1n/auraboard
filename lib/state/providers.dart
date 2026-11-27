@@ -1,14 +1,22 @@
+import 'dart:async';
+
+import 'package:auraboard/audio/soloud_audio_engine.dart';
 import 'package:auraboard/data/library_repository.dart';
 import 'package:auraboard/domain/audio_engine.dart';
 import 'package:auraboard/domain/clock.dart';
 import 'package:auraboard/domain/models.dart';
+import 'package:auraboard/domain/playback_engine.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+export 'package:auraboard/domain/playback_engine.dart' show PlaybackState;
+
 /// Provides the active [AudioEngine] implementation.
-///
-/// Phase 1 defaults to a no-op engine; Phase 2 wires `SoLoudAudioEngine`.
 final audioEngineProvider = Provider<AudioEngine>((ref) {
-  return _NoopAudioEngine();
+  final engine = SoLoudAudioEngine();
+  ref.onDispose(() {
+    unawaited(engine.dispose());
+  });
+  return engine;
 });
 
 /// Provides the [Clock] used for playback scheduling and timestamps.
@@ -34,179 +42,118 @@ class LibraryController extends AsyncNotifier<SoundLibrary> {
   }
 }
 
-/// Immutable playback state keyed by pad identifier.
-class PlaybackState {
-  const PlaybackState({this.activeByPad = const <String, ActiveVoiceState>{}});
-
-  final Map<String, ActiveVoiceState> activeByPad;
-
-  /// Returns the current [PadPlaybackPhase] for [padId], defaulting to idle.
-  PadPlaybackPhase phaseForPad(String padId) {
-    return activeByPad[padId]?.phase ?? PadPlaybackPhase.idle;
-  }
-
-  PlaybackState copyWith({Map<String, ActiveVoiceState>? activeByPad}) {
-    return PlaybackState(
-      activeByPad: activeByPad != null
-          ? Map<String, ActiveVoiceState>.unmodifiable(activeByPad)
-          : this.activeByPad,
-    );
-  }
-
-  @override
-  bool operator ==(Object other) {
-    return identical(this, other) ||
-        other is PlaybackState && _mapEquals(other.activeByPad, activeByPad);
-  }
-
-  @override
-  int get hashCode => Object.hashAllUnordered(
-    activeByPad.entries.map((entry) => Object.hash(entry.key, entry.value)),
-  );
-}
-
-/// Controls pad playback state transitions.
+/// Controls pad playback state transitions via [PlaybackEngine].
 final playbackControllerProvider =
     NotifierProvider<PlaybackController, PlaybackState>(PlaybackController.new);
 
 class PlaybackController extends Notifier<PlaybackState> {
-  @override
-  PlaybackState build() => const PlaybackState();
+  late PlaybackEngine _engine;
+  bool _initialized = false;
+  Future<void>? _pendingInit;
+  bool _disposed = false;
 
-  /// Minimal Phase 1 tap handler: starts playback when idle, stops when active,
-  /// and records an error phase if loading fails.
-  Future<void> tapPad(SoundPad pad) async {
+  @override
+  PlaybackState build() {
+    _initialized = false;
+    _pendingInit = null;
+    _disposed = false;
+
     final audioEngine = ref.read(audioEngineProvider);
     final clock = ref.read(clockProvider);
-    final current = state.activeByPad[pad.id];
+    final initialSettings =
+        ref.read(libraryControllerProvider).asData?.value.settings ??
+        const BoardSettings();
 
-    if (current != null &&
-        (current.phase == PadPlaybackPhase.playing ||
-            current.phase == PadPlaybackPhase.fadingIn)) {
-      final handle = current.handle;
-      if (handle != null) {
-        await audioEngine.stop(handle);
+    var isBuildDisposed = false;
+    late final PlaybackEngine engine;
+    engine = PlaybackEngine(
+      audioEngine: audioEngine,
+      clock: clock,
+      settings: initialSettings,
+      onStateChanged: (nextState) {
+        if (!isBuildDisposed) {
+          state = nextState;
+        }
+      },
+    );
+    _engine = engine;
+
+    ref.listen<AsyncValue<SoundLibrary>>(libraryControllerProvider, (
+      previous,
+      next,
+    ) {
+      final nextSettings = next.asData?.value.settings;
+      final prevSettings = previous?.asData?.value.settings;
+      if (nextSettings != null &&
+          nextSettings != prevSettings &&
+          !isBuildDisposed) {
+        unawaited(engine.updateSettings(nextSettings));
       }
-      final updated = Map<String, ActiveVoiceState>.from(state.activeByPad)
-        ..remove(pad.id);
-      state = state.copyWith(activeByPad: updated);
+    });
+
+    ref.onDispose(() {
+      isBuildDisposed = true;
+      _disposed = true;
+      unawaited(engine.dispose(disposeAudioEngine: false));
+    });
+
+    return engine.state;
+  }
+
+  Future<void> _ensureInitialized() async {
+    if (_initialized || _disposed) {
       return;
     }
-
+    final pending = _pendingInit;
+    if (pending != null) {
+      await pending;
+      return;
+    }
+    final future = _engine.initialize();
+    _pendingInit = future;
     try {
-      final sourceId = await audioEngine.loadSource(
-        pad.audioPath,
-        isAsset: pad.isAsset,
-      );
-      final handle = await audioEngine.play(
-        sourceId,
-        volume: pad.volume,
-        looping: pad.type != PadType.effect,
-      );
-      final updated = Map<String, ActiveVoiceState>.from(state.activeByPad)
-        ..[pad.id] = ActiveVoiceState(
-          padId: pad.id,
-          handle: handle,
-          phase: PadPlaybackPhase.playing,
-          currentVolume: pad.volume,
-          startedAt: clock.now(),
-        );
-      state = state.copyWith(activeByPad: updated);
-    } on AudioLoadException catch (error) {
-      final updated = Map<String, ActiveVoiceState>.from(state.activeByPad)
-        ..[pad.id] = ActiveVoiceState(
-          padId: pad.id,
-          phase: PadPlaybackPhase.error,
-          currentVolume: 0.0,
-          errorMessage: error.message,
-        );
-      state = state.copyWith(activeByPad: updated);
+      await future;
+      if (!_disposed) {
+        _initialized = true;
+      }
+    } finally {
+      if (identical(_pendingInit, future)) {
+        _pendingInit = null;
+      }
     }
   }
-}
 
-class _NoopAudioEngine implements AudioEngine {
-  int _nextSourceId = 1;
-  int _nextHandleId = 1;
-  final Set<String> _activeHandles = <String>{};
-
-  @override
-  Future<void> initialize() async {}
-
-  @override
-  Future<void> dispose() async {
-    _activeHandles.clear();
+  Future<void> tapPad(SoundPad pad) async {
+    await _ensureInitialized();
+    await _engine.tapPad(pad);
   }
 
-  @override
-  Future<String> loadSource(String path, {bool isAsset = false}) async {
-    return 'noop_source_${_nextSourceId++}';
+  Future<void> stopPad(String padId) async {
+    await _engine.stopPad(padId);
   }
 
-  @override
-  Future<void> unloadSource(String sourceId) async {}
-
-  @override
-  Duration getSourceDuration(String sourceId) => Duration.zero;
-
-  @override
-  Future<String> play(
-    String sourceId, {
-    double volume = 1.0,
-    bool looping = false,
-  }) async {
-    final handle = 'noop_handle_${_nextHandleId++}';
-    _activeHandles.add(handle);
-    return handle;
+  Future<void> stopAll() async {
+    await _engine.stopAll();
   }
 
-  @override
-  Future<void> stop(String handle) async {
-    _activeHandles.remove(handle);
+  Future<void> setPadVolume(String padId, double volume) async {
+    await _engine.setPadVolume(padId, volume);
   }
 
-  @override
-  Future<void> setVolume(String handle, double volume) async {}
-
-  @override
-  Future<void> fadeVolume(
-    String handle,
-    double targetVolume,
-    Duration duration,
-  ) async {}
-
-  @override
-  Future<void> scheduleStop(String handle, Duration delay) async {
-    _activeHandles.remove(handle);
+  Future<void> setMasterVolume(double volume) async {
+    await _ensureInitialized();
+    await _engine.setMasterVolume(volume);
   }
 
-  @override
-  Future<void> setMasterVolume(double volume) async {}
-
-  @override
-  Future<void> pauseAll() async {}
-
-  @override
-  Future<void> resumeAll() async {}
-
-  @override
-  bool isHandleActive(String handle) => _activeHandles.contains(handle);
-
-  @override
-  Duration getPosition(String handle) => Duration.zero;
-}
-
-bool _mapEquals<K, V>(Map<K, V> a, Map<K, V> b) {
-  if (identical(a, b)) {
-    return true;
+  Future<void> pauseForInterruption() async {
+    await _engine.pauseForInterruption();
   }
-  if (a.length != b.length) {
-    return false;
+
+  Future<void> resumeAfterInterruption() async {
+    await _engine.resumeAfterInterruption();
   }
-  for (final entry in a.entries) {
-    if (!b.containsKey(entry.key) || b[entry.key] != entry.value) {
-      return false;
-    }
+
+  void clearPadError(String padId) {
+    _engine.clearPadError(padId);
   }
-  return true;
 }

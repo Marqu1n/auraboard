@@ -443,6 +443,9 @@ class ActiveVoiceState {
     this.handle,
     required this.phase,
     this.currentVolume = 1.0,
+    this.activeLayerCount = 1,
+    this.position = Duration.zero,
+    this.duration = Duration.zero,
     this.startedAt,
     this.errorMessage,
   });
@@ -451,8 +454,14 @@ class ActiveVoiceState {
   final String? handle;
   final PadPlaybackPhase phase;
   final double currentVolume;
+  final int activeLayerCount;
+  final Duration position;
+  final Duration duration;
   final DateTime? startedAt;
   final String? errorMessage;
+
+  /// Effective per-pad playback volume in the range `[0.0, 1.0]`.
+  double get volume => currentVolume;
 
   ActiveVoiceState copyWith({
     String? padId,
@@ -460,6 +469,9 @@ class ActiveVoiceState {
     bool clearHandle = false,
     PadPlaybackPhase? phase,
     double? currentVolume,
+    int? activeLayerCount,
+    Duration? position,
+    Duration? duration,
     DateTime? startedAt,
     bool clearStartedAt = false,
     String? errorMessage,
@@ -470,6 +482,9 @@ class ActiveVoiceState {
       handle: clearHandle ? null : (handle ?? this.handle),
       phase: phase ?? this.phase,
       currentVolume: currentVolume ?? this.currentVolume,
+      activeLayerCount: activeLayerCount ?? this.activeLayerCount,
+      position: position ?? this.position,
+      duration: duration ?? this.duration,
       startedAt: clearStartedAt ? null : (startedAt ?? this.startedAt),
       errorMessage: clearErrorMessage
           ? null
@@ -483,6 +498,9 @@ class ActiveVoiceState {
       'handle': handle,
       'phase': phase.name,
       'currentVolume': currentVolume,
+      'activeLayerCount': activeLayerCount,
+      'positionMs': position.inMilliseconds,
+      'durationMs': duration.inMilliseconds,
       'startedAt': startedAt?.toIso8601String(),
       'errorMessage': errorMessage,
     };
@@ -495,6 +513,13 @@ class ActiveVoiceState {
       handle: json['handle'] as String?,
       phase: PadPlaybackPhase.values.byName(json['phase'] as String),
       currentVolume: (json['currentVolume'] as num?)?.toDouble() ?? 1.0,
+      activeLayerCount: (json['activeLayerCount'] as num?)?.toInt() ?? 1,
+      position: Duration(
+        milliseconds: (json['positionMs'] as num?)?.toInt() ?? 0,
+      ),
+      duration: Duration(
+        milliseconds: (json['durationMs'] as num?)?.toInt() ?? 0,
+      ),
       startedAt: startedAtRaw != null ? DateTime.parse(startedAtRaw) : null,
       errorMessage: json['errorMessage'] as String?,
     );
@@ -508,17 +533,30 @@ class ActiveVoiceState {
             other.handle == handle &&
             other.phase == phase &&
             other.currentVolume == currentVolume &&
+            other.activeLayerCount == activeLayerCount &&
+            other.position == position &&
+            other.duration == duration &&
             other.startedAt == startedAt &&
             other.errorMessage == errorMessage;
   }
 
   @override
-  int get hashCode =>
-      Object.hash(padId, handle, phase, currentVolume, startedAt, errorMessage);
+  int get hashCode => Object.hash(
+    padId,
+    handle,
+    phase,
+    currentVolume,
+    activeLayerCount,
+    position,
+    duration,
+    startedAt,
+    errorMessage,
+  );
 
   @override
   String toString() =>
-      'ActiveVoiceState(padId: $padId, handle: $handle, phase: $phase)';
+      'ActiveVoiceState(padId: $padId, handle: $handle, phase: $phase, '
+      'layers: $activeLayerCount)';
 }
 
 bool _listEquals<T>(List<T> a, List<T> b) {

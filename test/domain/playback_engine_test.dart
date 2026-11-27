@@ -1,4 +1,5 @@
-import 'package:auraboard/domain/audio_engine.dart';
+import 'dart:async';
+
 import 'package:auraboard/domain/models.dart';
 import 'package:auraboard/domain/playback_engine.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -9,13 +10,34 @@ import '../helpers/fake_clock.dart';
 /// Extends [FakeAudioEngine] to capture the exact initial volume passed to
 /// [play] before any subsequent [fadeVolume] call mutates handle volume.
 class _RecordingFakeAudioEngine extends FakeAudioEngine {
-  _RecordingFakeAudioEngine({
-    super.defaultDuration,
-    super.failingPaths,
-    super.durationsByPath,
-  });
+  _RecordingFakeAudioEngine({super.defaultDuration, super.durationsByPath});
 
   final Map<String, double> initialPlayVolumeByHandle = <String, double>{};
+  Completer<void>? loadGate;
+  Completer<void>? fadeGate;
+
+  @override
+  Future<String> loadSource(String path, {bool isAsset = false}) async {
+    final gate = loadGate;
+    if (gate != null && !gate.isCompleted) {
+      await gate.future;
+    }
+    return super.loadSource(path, isAsset: isAsset);
+  }
+
+  @override
+  Future<void> fadeVolume(
+    String handle,
+    double targetVolume,
+    Duration duration,
+  ) async {
+    final gate = fadeGate;
+    if (gate != null && !gate.isCompleted) {
+      fadeGate = null;
+      await gate.future;
+    }
+    return super.fadeVolume(handle, targetVolume, duration);
+  }
 
   @override
   Future<String> play(
@@ -1074,6 +1096,153 @@ void main() {
         // Calling clearPadError on a playing pad does not stop or clear it.
         engine.clearPadError(music.id);
         expect(engine.state.phaseForPad(music.id), PadPlaybackPhase.playing);
+      },
+    );
+
+    test(
+      'error on re-tapped active pad stops prior active handles without leaking',
+      () async {
+        await engine.initialize();
+        final fx = _effectPad(id: 'fx_flaky', audioPath: 'audio/flaky.wav');
+
+        await engine.tapPad(fx);
+        final firstHandle = audio.playedHandles.single;
+        expect(audio.isHandleActive(firstHandle), isTrue);
+
+        // Make subsequent load fail (simulating file deleted mid-session).
+        audio.failingPaths.add(fx.audioPath);
+        await engine.tapPad(fx);
+
+        expect(engine.state.phaseForPad(fx.id), PadPlaybackPhase.error);
+        expect(audio.stoppedHandles, contains(firstHandle));
+        expect(audio.isHandleActive(firstHandle), isFalse);
+      },
+    );
+  });
+
+  group('Concurrency, interrupted fades, and paused timer edge cases', () {
+    test(
+      'rapid concurrent music taps while loadSource is pending only keep latest track',
+      () async {
+        await engine.initialize();
+        final musicA = _musicPad(id: 'm_a', audioPath: 'audio/a.wav');
+        final musicB = _musicPad(id: 'm_b', audioPath: 'audio/b.wav');
+
+        final gate = Completer<void>();
+        audio.loadGate = gate;
+
+        final tapA = engine.tapPad(musicA);
+        final tapB = engine.tapPad(musicB);
+
+        gate.complete();
+        await Future.wait<void>([tapA, tapB]);
+
+        clock.advance(const Duration(milliseconds: 500));
+        expect(engine.state.phaseForPad(musicA.id), PadPlaybackPhase.idle);
+        expect(engine.state.phaseForPad(musicB.id), PadPlaybackPhase.playing);
+        expect(audio.activeHandles, hasLength(1));
+        expect(
+          audio.pathForHandle(audio.activeHandles.single),
+          musicB.audioPath,
+        );
+      },
+    );
+
+    test(
+      're-tapping music or ambience while fadingOut stops old handle and fades back in',
+      () async {
+        await engine.initialize();
+        final rain = _ambiencePad(id: 'amb_rain');
+
+        await engine.tapPad(rain);
+        final firstHandle = audio.playedHandles.single;
+        clock.advance(const Duration(milliseconds: 500));
+        expect(engine.state.phaseForPad(rain.id), PadPlaybackPhase.playing);
+
+        // Start fading out.
+        await engine.tapPad(rain);
+        expect(engine.state.phaseForPad(rain.id), PadPlaybackPhase.fadingOut);
+        clock.advance(const Duration(milliseconds: 300));
+
+        // Change mind mid-fade-out: tap again to fade back in.
+        await engine.tapPad(rain);
+        expect(engine.state.phaseForPad(rain.id), PadPlaybackPhase.fadingIn);
+        expect(audio.stoppedHandles, contains(firstHandle));
+        expect(audio.playedHandles, hasLength(2));
+        final secondHandle = audio.playedHandles.last;
+
+        clock.advance(const Duration(milliseconds: 500));
+        expect(engine.state.phaseForPad(rain.id), PadPlaybackPhase.playing);
+        expect(audio.isHandleActive(secondHandle), isTrue);
+      },
+    );
+
+    test(
+      'stopAll during async fadeVolume does not leave pad stuck in fadingOut',
+      () async {
+        await engine.initialize();
+        final music = _musicPad(id: 'm_race');
+
+        final fadeGate = Completer<void>();
+        audio.fadeGate = fadeGate;
+
+        final tapFuture = engine.tapPad(music);
+        await Future<void>.delayed(Duration.zero);
+
+        // Trigger stopAll while fadeVolume is still yielding.
+        final stopFuture = engine.stopAll();
+        fadeGate.complete();
+        await Future.wait<void>([tapFuture, stopFuture]);
+
+        expect(engine.state.phaseForPad(music.id), PadPlaybackPhase.fadingOut);
+        clock.advance(const Duration(milliseconds: 1000));
+        expect(engine.state.phaseForPad(music.id), PadPlaybackPhase.idle);
+        expect(engine.state.activeByPad, isEmpty);
+        expect(clock.activeTimerCount, 0);
+      },
+    );
+
+    test(
+      'pauseForInterruption and resumeAfterInterruption preserve fade-in, fade-out, and effect timers',
+      () async {
+        await engine.initialize();
+        final musicA = _musicPad(id: 'm_a', audioPath: 'audio/a.wav');
+        final musicB = _musicPad(id: 'm_b', audioPath: 'audio/b.wav');
+        final fx = _effectPad(id: 'fx_1', audioPath: 'sfx/long_horn.wav');
+
+        // Start Music A (playing), then start 2000ms crossfade to Music B (A fadingOut, B fadingIn), plus a 3000ms Effect.
+        await engine.tapPad(musicA);
+        clock.advance(const Duration(milliseconds: 500));
+        await engine.tapPad(musicB);
+        await engine.tapPad(fx);
+
+        // Advance 1000ms into 2000ms crossfade & 3000ms effect.
+        clock.advance(const Duration(milliseconds: 1000));
+        expect(engine.state.phaseForPad(musicA.id), PadPlaybackPhase.fadingOut);
+        expect(engine.state.phaseForPad(musicB.id), PadPlaybackPhase.fadingIn);
+        expect(engine.state.phaseForPad(fx.id), PadPlaybackPhase.playing);
+
+        // Phone call arrives: pause everything for 10 seconds!
+        await engine.pauseForInterruption();
+        clock.advance(const Duration(seconds: 10));
+
+        // Nothing should have completed while paused!
+        expect(engine.state.phaseForPad(musicA.id), PadPlaybackPhase.fadingOut);
+        expect(engine.state.phaseForPad(musicB.id), PadPlaybackPhase.fadingIn);
+        expect(engine.state.phaseForPad(fx.id), PadPlaybackPhase.playing);
+
+        // Phone call ends: resume.
+        await engine.resumeAfterInterruption();
+
+        // After remaining 1000ms of crossfade, A completes fadeOut and B completes fadeIn.
+        clock.advance(const Duration(milliseconds: 1000));
+        expect(engine.state.phaseForPad(musicA.id), PadPlaybackPhase.idle);
+        expect(engine.state.phaseForPad(musicB.id), PadPlaybackPhase.playing);
+        // Effect still has 1000ms left (3000 - 1000 - 1000 = 1000).
+        expect(engine.state.phaseForPad(fx.id), PadPlaybackPhase.playing);
+
+        clock.advance(const Duration(milliseconds: 1000));
+        expect(engine.state.phaseForPad(fx.id), PadPlaybackPhase.idle);
       },
     );
   });
