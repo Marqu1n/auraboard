@@ -1,6 +1,7 @@
 import 'package:auraboard/app.dart';
 import 'package:auraboard/data/library_repository.dart';
 import 'package:auraboard/state/providers.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -38,9 +39,14 @@ void main() {
         expect(find.text('Sword Clash'), findsOneWidget);
         expect(find.text('Battle Drums'), findsOneWidget);
 
+        final battleDrumsInGrid = find.descendant(
+          of: find.byType(GridView),
+          matching: find.text('Battle Drums'),
+        );
+
         // c) Tapping Battle Drums starts playback (fading in -> playing) and
         //    updates visual + semantic active state unmistakably.
-        await tester.tap(find.text('Battle Drums'));
+        await tester.tap(battleDrumsInGrid);
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 50));
 
@@ -80,7 +86,7 @@ void main() {
 
         // d) Tapping Battle Drums a second time fades out smoothly and stops
         //    playback, returning the pad to idle state.
-        await tester.tap(find.text('Battle Drums'));
+        await tester.tap(battleDrumsInGrid);
         await tester.pump();
         await tester.pump(const Duration(milliseconds: 50));
 

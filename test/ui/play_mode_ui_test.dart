@@ -1,3 +1,5 @@
+import 'dart:ui' show SemanticsAction;
+
 import 'package:auraboard/app.dart';
 import 'package:auraboard/data/demo_board.dart';
 import 'package:auraboard/data/library_repository.dart';
@@ -192,7 +194,7 @@ void main() {
           await tester.pump();
 
           expect(
-            _findAnyIconIn(padTile, const <IconData>{
+            _findAnyIconIn(padTile, <IconData>{
               Icons.trending_up,
               Icons.north_east,
             }),
@@ -218,7 +220,7 @@ void main() {
           await tester.pump();
 
           expect(
-            _findAnyIconIn(padTile, const <IconData>{
+            _findAnyIconIn(padTile, <IconData>{
               Icons.graphic_eq,
               Icons.volume_up,
             }),
@@ -231,7 +233,7 @@ void main() {
           expect(_findLoopIndicatorIn(padTile), findsWidgets);
           // Visually distinct from Fading in.
           expect(
-            _findAnyIconIn(padTile, const <IconData>{
+            _findAnyIconIn(padTile, <IconData>{
               Icons.trending_up,
               Icons.north_east,
             }),
@@ -257,7 +259,7 @@ void main() {
           await tester.pump();
 
           expect(
-            _findAnyIconIn(padTile, const <IconData>{
+            _findAnyIconIn(padTile, <IconData>{
               Icons.trending_down,
               Icons.south_east,
             }),
@@ -553,6 +555,8 @@ void main() {
           final drumsHandle = fakeEngine.playedHandles.last;
 
           // Switch to Tavern folder and start Steady Rain.
+          await tester.ensureVisible(find.text('Tavern'));
+          await tester.pump();
           await tester.tap(find.text('Tavern'));
           await tester.pump();
           await tester.tap(_findPadTileInGrid('Steady Rain'));
@@ -649,6 +653,8 @@ void main() {
           await tester.pump();
           final drumsHandle = fakeEngine.playedHandles.last;
 
+          await tester.ensureVisible(find.text('Tavern'));
+          await tester.pump();
           await tester.tap(find.text('Tavern'));
           await tester.pump();
           await tester.tap(_findPadTileInGrid('Steady Rain'));
@@ -862,8 +868,8 @@ void main() {
           expect(
             MediaQuery.textScalerOf(
               tester.element(find.byType(Scaffold).first),
-            ),
-            const TextScaler.linear(2.0),
+            ).scale(14.0),
+            closeTo(28.0, 0.01),
           );
 
           // Activate two sounds across folders to stress Now Playing at 2.0x.
@@ -875,6 +881,8 @@ void main() {
           fakeClock.advance(const Duration(milliseconds: 600));
           await tester.pump();
 
+          await tester.ensureVisible(find.text('Tavern'));
+          await tester.pump();
           await tester.tap(find.text('Tavern'));
           await tester.pump();
           final rainTile = _findPadTileInGrid('Steady Rain');
@@ -926,8 +934,8 @@ void main() {
           expect(
             MediaQuery.textScalerOf(
               tester.element(find.byType(Scaffold).first),
-            ),
-            const TextScaler.linear(1.5),
+            ).scale(14.0),
+            closeTo(21.0, 0.01),
           );
 
           final drumsTile = _findPadTileInGrid('Battle Drums');
@@ -979,8 +987,8 @@ void main() {
           expect(
             MediaQuery.textScalerOf(
               tester.element(find.byType(Scaffold).first),
-            ),
-            const TextScaler.linear(2.0),
+            ).scale(14.0),
+            closeTo(28.0, 0.01),
           );
 
           final drumsTile = _findPadTileInGrid('Battle Drums');
@@ -1087,6 +1095,51 @@ void main() {
             greaterThanOrEqualTo(48.0),
             reason: 'Folder chip "$folderName" height must be >= 48dp',
           );
+        }
+
+        // Audit Master volume slider and Settings button touch target sizes.
+        final masterSlider = _findMasterVolumeSlider();
+        expect(masterSlider, findsOneWidget);
+        final sliderSize = tester.getSize(masterSlider);
+        expect(
+          sliderSize.height,
+          greaterThanOrEqualTo(48.0),
+          reason: 'Master volume slider height must be >= 48dp',
+        );
+        final settingsBtn = _findSettingsButton();
+        expect(settingsBtn, findsOneWidget);
+        final settingsSize = tester.getSize(settingsBtn);
+        expect(settingsSize.width, greaterThanOrEqualTo(48.0));
+        expect(settingsSize.height, greaterThanOrEqualTo(48.0));
+
+        // Audit screen-reader SemanticsAction.tap on PadTile and Stop All.
+        final semanticsHandle = tester.ensureSemantics();
+        try {
+          final padSemantics = tester.getSemantics(
+            find.bySemanticsLabel(
+              RegExp(r'Battle Drums.*Idle', caseSensitive: false, dotAll: true),
+            ),
+          );
+          expect(
+            padSemantics.getSemanticsData().hasAction(SemanticsAction.tap),
+            isTrue,
+            reason:
+                'PadTile must expose SemanticsAction.tap for screen readers',
+          );
+
+          final stopAllSemantics = tester.getSemantics(
+            find.bySemanticsLabel(
+              RegExp(r'Stop all', caseSensitive: false, dotAll: true),
+            ),
+          );
+          expect(
+            stopAllSemantics.getSemanticsData().hasAction(SemanticsAction.tap),
+            isTrue,
+            reason:
+                'Stop All must expose SemanticsAction.tap for screen readers',
+          );
+        } finally {
+          semanticsHandle.dispose();
         }
       },
     );

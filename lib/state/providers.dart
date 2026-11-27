@@ -40,6 +40,17 @@ class LibraryController extends AsyncNotifier<SoundLibrary> {
   Future<SoundLibrary> build() async {
     return ref.read(libraryRepositoryProvider).load();
   }
+
+  /// Updates persisted [BoardSettings] in memory and storage.
+  Future<void> updateSettings(BoardSettings settings) async {
+    final current = state.asData?.value ?? await future;
+    if (current.settings == settings) {
+      return;
+    }
+    final updated = current.copyWith(settings: settings);
+    state = AsyncData<SoundLibrary>(updated);
+    await ref.read(libraryRepositoryProvider).save(updated);
+  }
 }
 
 /// Controls pad playback state transitions via [PlaybackEngine].
@@ -86,6 +97,7 @@ class PlaybackController extends Notifier<PlaybackState> {
       final prevSettings = previous?.asData?.value.settings;
       if (nextSettings != null &&
           nextSettings != prevSettings &&
+          nextSettings != engine.settings &&
           !isBuildDisposed) {
         unawaited(engine.updateSettings(nextSettings));
       }
@@ -142,7 +154,17 @@ class PlaybackController extends Notifier<PlaybackState> {
 
   Future<void> setMasterVolume(double volume) async {
     await _ensureInitialized();
-    await _engine.setMasterVolume(volume);
+    final clamped = volume.clamp(0.0, 1.0).toDouble();
+    await _engine.setMasterVolume(clamped);
+    final currentLibrary = ref.read(libraryControllerProvider).asData?.value;
+    if (currentLibrary != null &&
+        currentLibrary.settings.masterVolume != clamped) {
+      await ref
+          .read(libraryControllerProvider.notifier)
+          .updateSettings(
+            currentLibrary.settings.copyWith(masterVolume: clamped),
+          );
+    }
   }
 
   Future<void> pauseForInterruption() async {
