@@ -33,3 +33,9 @@ Concise log of stack choices and ambiguity resolutions, each favoring mid-sessio
 - **Minimum one folder invariant**: `LibraryOperations.deleteFolder` refuses to delete the last remaining folder (`StateError`) so the board always has a valid folder for pads and imports; deleting a non-last folder offers moving its pads to another folder or removing them.
 - **Serialized atomic JSON persistence (`FileLibraryRepository`)**: Writes serialize through a chained future queue (`library.json.tmp` -> flush -> atomic rename) so rapid slider drags or reorders never race or corrupt storage; corrupt JSON is preserved in a `.corrupt` backup before falling back to the demo board.
 - **Optional pad icons**: `SoundPad.icon` is nullable (`PadIcon?`) so users can assign any of the 16 bundled Material icons or omit an icon in the Pad Editor.
+
+## Phase 6 — Background Playback, Audio Focus & Session Resilience
+
+- **Notification ducking vs. phone call interruptions (`audio_session`)**: Configured `AudioSessionConfiguration.music()` with `androidWillPauseWhenDucked: false` and ignored `AudioInterruptionType.duck` events so notifications from other apps never pause or stop tabletop music, while `AudioInterruptionType.pause` / `unknown` (e.g. incoming phone calls) pause active voices/timers and resume cleanly when the interruption ends.
+- **Foreground media service (`audio_service`) with `androidStopForegroundOnPause: false`**: Keeps the Android `mediaPlayback` foreground service alive while paused for a phone call with the screen locked, avoiding Android 12+ `ForegroundServiceStartNotAllowedException` on automatic resume, and stops the foreground service cleanly when all sounds return to idle.
+- **No playback auto-resume after app kill**: `PlaybackEngine` always initializes to `PlaybackState.empty`; only folders, pads, and settings (including `keepScreenAwake`) restore from `FileLibraryRepository` on cold start.
