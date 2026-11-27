@@ -695,6 +695,39 @@ void main() {
             greaterThanOrEqualTo(48.0),
           );
 
+          // Open Pad Editor at 360x740 & 2.0x text scale to verify zero overflow.
+          final swordTile = _findPadTileInGrid('Sword Clash');
+          await tester.ensureVisible(swordTile);
+          await tester.pump();
+          await tester.tap(swordTile);
+          await tester.pumpAndSettle();
+          expect(find.byKey(const Key('pad_editor_folder')), findsOneWidget);
+          Navigator.of(
+            tester.element(find.byKey(const Key('pad_editor_save'))),
+          ).pop();
+          await tester.pumpAndSettle();
+
+          // Open Folder Manager & Delete Folder dialog (with DropdownButtonFormField)
+          // at 360x740 & 2.0x text scale to verify zero horizontal overflow.
+          await tester.tap(manageFolders);
+          await tester.pumpAndSettle();
+          final combatFolder = (await repository.load()).folders.firstWhere(
+            (f) => f.name == 'Combat',
+          );
+          final deleteCombatBtn = find.byKey(
+            Key('delete_folder_${combatFolder.id}'),
+          );
+          await tester.ensureVisible(deleteCombatBtn);
+          await tester.pump();
+          await tester.tap(deleteCombatBtn);
+          await tester.pumpAndSettle();
+          expect(
+            find.byKey(const Key('delete_folder_move_target')),
+            findsOneWidget,
+          );
+          await tester.tap(find.text('Cancel'));
+          await tester.pumpAndSettle();
+
           expect(flutterErrors, isEmpty);
           expect(tester.takeException(), isNull);
         } finally {

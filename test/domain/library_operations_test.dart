@@ -434,6 +434,19 @@ void main() {
 
       expect(updated, equals(initial));
     });
+
+    test('throws ArgumentError when targetFolderId does not exist', () {
+      final initial = _sampleLibrary();
+
+      expect(
+        () => LibraryOperations.movePadToFolder(
+          initial,
+          padId: 'p_sword',
+          targetFolderId: 'f_missing',
+        ),
+        throwsArgumentError,
+      );
+    });
   });
 
   group('LibraryOperations.updatePad', () {

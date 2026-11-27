@@ -11,12 +11,16 @@ class PadTile extends StatelessWidget {
     required this.voice,
     required this.density,
     required this.onTap,
+    this.isEditMode = false,
+    this.isDropTarget = false,
   });
 
   final SoundPad pad;
   final ActiveVoiceState? voice;
   final GridDensity density;
   final VoidCallback onTap;
+  final bool isEditMode;
+  final bool isDropTarget;
 
   @override
   Widget build(BuildContext context) {
@@ -51,6 +55,7 @@ class PadTile extends StatelessWidget {
 
     final statusText = phaseLabel(phase);
     final semanticParts = <String>[
+      if (isEditMode) 'Edit',
       pad.label,
       padTypeLabel(pad.type),
       if (isLooping) 'Loop',
@@ -65,6 +70,17 @@ class PadTile extends StatelessWidget {
     );
     final iconSize = isCompact ? 20.0 : 22.0;
     final labelMaxLines = (isCompact && textScale >= 1.5) ? 1 : 2;
+    final padIcon = pad.icon;
+    final borderColor = isDropTarget
+        ? colorScheme.primary
+        : (isEditMode && phase == PadPlaybackPhase.idle
+              ? colorScheme.outline
+              : style.borderColor);
+    final borderWidth = isDropTarget
+        ? 3.0
+        : (isEditMode && phase == PadPlaybackPhase.idle
+              ? 1.5
+              : style.borderWidth);
 
     return Semantics(
       button: true,
@@ -80,10 +96,7 @@ class PadTile extends StatelessWidget {
           elevation: style.elevation,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(16),
-            side: BorderSide(
-              color: style.borderColor,
-              width: style.borderWidth,
-            ),
+            side: BorderSide(color: borderColor, width: borderWidth),
           ),
           clipBehavior: Clip.antiAlias,
           child: InkWell(
@@ -105,19 +118,20 @@ class PadTile extends StatelessWidget {
                       children: <Widget>[
                         Row(
                           children: <Widget>[
-                            Icon(
-                              iconForPad(pad.icon),
-                              size: iconSize,
-                              color: style.padIconColor,
-                            ),
-                            if (isLooping) ...<Widget>[
-                              const SizedBox(width: 6),
+                            if (padIcon != null) ...<Widget>[
+                              Icon(
+                                iconForPad(padIcon),
+                                size: iconSize,
+                                color: style.padIconColor,
+                              ),
+                              if (isLooping) const SizedBox(width: 6),
+                            ],
+                            if (isLooping)
                               Icon(
                                 Icons.repeat,
                                 size: 16,
                                 color: style.loopIconColor,
                               ),
-                            ],
                             if (showLayerBadge) ...<Widget>[
                               const SizedBox(width: 6),
                               Expanded(
@@ -145,6 +159,13 @@ class PadTile extends StatelessWidget {
                                     ),
                                   ),
                                 ),
+                              ),
+                            ] else if (isEditMode) ...<Widget>[
+                              const Spacer(),
+                              Icon(
+                                Icons.drag_indicator,
+                                size: 18,
+                                color: colorScheme.onSurfaceVariant,
                               ),
                             ],
                           ],

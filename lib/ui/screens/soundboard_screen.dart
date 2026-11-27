@@ -1,13 +1,16 @@
 import 'package:auraboard/domain/models.dart';
 import 'package:auraboard/state/providers.dart';
+import 'package:auraboard/ui/widgets/folder_manager_sheet.dart';
 import 'package:auraboard/ui/widgets/now_playing_bar.dart';
+import 'package:auraboard/ui/widgets/pad_editor_sheet.dart';
 import 'package:auraboard/ui/widgets/pad_tile.dart';
 import 'package:auraboard/ui/widgets/settings_sheet.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:material_ui/material_ui.dart';
 
-/// Primary Play-Mode soundboard screen with folder strip, responsive pad grid,
-/// and persistent Now-Playing mixer bar.
+/// Primary soundboard screen supporting safe Play Mode (default) and explicit
+/// Edit Mode for folder/pad customization, drag-and-drop reordering, and
+/// moving pads across folders.
 class SoundboardScreen extends ConsumerStatefulWidget {
   const SoundboardScreen({super.key});
 
@@ -18,10 +21,24 @@ class SoundboardScreen extends ConsumerStatefulWidget {
 class _SoundboardScreenState extends ConsumerState<SoundboardScreen> {
   String? _selectedFolderId;
 
+  Future<void> _handleAddFolder() async {
+    final name = await showFolderNameDialog(
+      context,
+      title: 'New Folder',
+      confirmLabel: 'Create',
+    );
+    if (name != null && mounted) {
+      await ref.read(libraryControllerProvider.notifier).createFolder(name);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
     final libraryAsync = ref.watch(libraryControllerProvider);
     final playbackState = ref.watch(playbackControllerProvider);
+    final isEditMode = ref.watch(editModeProvider);
     final mediaQuery = MediaQuery.of(context);
     final isShortViewport = mediaQuery.size.height < 420;
 
@@ -30,6 +47,20 @@ class _SoundboardScreenState extends ConsumerState<SoundboardScreen> {
         title: const Text('AuraBoard'),
         toolbarHeight: isShortViewport ? 48 : null,
         actions: <Widget>[
+          IconButton(
+            key: const Key('edit_mode_toggle'),
+            tooltip: isEditMode ? 'Exit edit mode' : 'Edit mode',
+            isSelected: isEditMode,
+            constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
+            style: isEditMode
+                ? IconButton.styleFrom(
+                    backgroundColor: colorScheme.tertiaryContainer,
+                    foregroundColor: colorScheme.onTertiaryContainer,
+                  )
+                : null,
+            icon: Icon(isEditMode ? Icons.check_rounded : Icons.edit_outlined),
+            onPressed: () => ref.read(editModeProvider.notifier).toggle(),
+          ),
           IconButton(
             key: const Key('settings_button'),
             tooltip: 'Settings',
@@ -83,11 +114,20 @@ class _SoundboardScreenState extends ConsumerState<SoundboardScreen> {
           final playbackNotifier = ref.read(
             playbackControllerProvider.notifier,
           );
+          final libraryNotifier = ref.read(libraryControllerProvider.notifier);
+
+          final editModeBanner = isEditMode
+              ? _EditModeBanner(
+                  onAddFolder: _handleAddFolder,
+                  onManageFolders: () => showFolderManagerSheet(context),
+                )
+              : null;
 
           if (folders.isEmpty) {
             return Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: <Widget>[
+                ?editModeBanner,
                 const Expanded(
                   child: Center(child: Text('No folders available')),
                 ),
@@ -120,6 +160,7 @@ class _SoundboardScreenState extends ConsumerState<SoundboardScreen> {
           return Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: <Widget>[
+              ?editModeBanner,
               SingleChildScrollView(
                 scrollDirection: Axis.horizontal,
                 padding: EdgeInsets.symmetric(
@@ -130,22 +171,19 @@ class _SoundboardScreenState extends ConsumerState<SoundboardScreen> {
                   children: <Widget>[
                     for (var i = 0; i < folders.length; i++) ...<Widget>[
                       if (i > 0) const SizedBox(width: 8),
-                      ChoiceChip(
-                        label: Text(folders[i].name),
+                      _FolderChip(
+                        folder: folders[i],
                         selected: folders[i].id == effectiveFolderId,
-                        materialTapTargetSize: MaterialTapTargetSize.padded,
-                        labelPadding: const EdgeInsets.symmetric(
-                          horizontal: 6,
-                          vertical: 2,
-                        ),
-                        padding: EdgeInsets.symmetric(
-                          horizontal: 10,
-                          vertical: isShortViewport ? 8 : 13,
-                        ),
-                        onSelected: (_) {
+                        isShortViewport: isShortViewport,
+                        isEditMode: isEditMode,
+                        padsById: padsById,
+                        onSelected: () {
                           setState(() {
                             _selectedFolderId = folders[i].id;
                           });
+                        },
+                        onPadDropped: (padId) {
+                          libraryNotifier.movePadToFolder(padId, folders[i].id);
                         },
                       ),
                     ],
@@ -153,50 +191,119 @@ class _SoundboardScreenState extends ConsumerState<SoundboardScreen> {
                 ),
               ),
               Expanded(
-                child: LayoutBuilder(
-                  builder: (context, constraints) {
-                    final horizontalPadding = constraints.maxWidth >= 600
-                        ? 16.0
-                        : 12.0;
-                    final availableWidth =
-                        constraints.maxWidth - (horizontalPadding * 2);
-                    final crossAxisCount = _columnCountForWidth(
-                      availableWidth,
-                      density,
-                    );
-                    final mainAxisExtent = _tileHeightForDensity(
-                      density,
-                      textScale,
-                    );
-                    final spacing = density == GridDensity.compact ? 8.0 : 12.0;
+                child: visiblePads.isEmpty
+                    ? const Center(child: Text('No pads in this folder'))
+                    : LayoutBuilder(
+                        builder: (context, constraints) {
+                          final horizontalPadding = constraints.maxWidth >= 600
+                              ? 16.0
+                              : 12.0;
+                          final availableWidth =
+                              constraints.maxWidth - (horizontalPadding * 2);
+                          final crossAxisCount = _columnCountForWidth(
+                            availableWidth,
+                            density,
+                          );
+                          final mainAxisExtent = _tileHeightForDensity(
+                            density,
+                            textScale,
+                          );
+                          final spacing = density == GridDensity.compact
+                              ? 8.0
+                              : 12.0;
+                          final tileWidth =
+                              ((availableWidth -
+                                          (spacing * (crossAxisCount - 1))) /
+                                      crossAxisCount)
+                                  .clamp(48.0, double.infinity);
 
-                    return GridView.builder(
-                      padding: EdgeInsets.fromLTRB(
-                        horizontalPadding,
-                        isShortViewport ? 4 : 8,
-                        horizontalPadding,
-                        isShortViewport ? 8 : 16,
+                          return GridView.builder(
+                            padding: EdgeInsets.fromLTRB(
+                              horizontalPadding,
+                              isShortViewport ? 4 : 8,
+                              horizontalPadding,
+                              isShortViewport ? 8 : 16,
+                            ),
+                            gridDelegate:
+                                SliverGridDelegateWithFixedCrossAxisCount(
+                                  crossAxisCount: crossAxisCount,
+                                  mainAxisExtent: mainAxisExtent,
+                                  crossAxisSpacing: spacing,
+                                  mainAxisSpacing: spacing,
+                                ),
+                            itemCount: visiblePads.length,
+                            itemBuilder: (context, index) {
+                              final pad = visiblePads[index];
+                              final voice = playbackState.activeByPad[pad.id];
+
+                              if (!isEditMode) {
+                                return PadTile(
+                                  pad: pad,
+                                  voice: voice,
+                                  density: density,
+                                  onTap: () => playbackNotifier.tapPad(pad),
+                                );
+                              }
+
+                              return DragTarget<String>(
+                                onWillAcceptWithDetails: (details) =>
+                                    details.data != pad.id,
+                                onAcceptWithDetails: (details) {
+                                  final draggedPadId = details.data;
+                                  final oldIndex = visiblePads.indexWhere(
+                                    (candidate) => candidate.id == draggedPadId,
+                                  );
+                                  if (oldIndex != -1 && oldIndex != index) {
+                                    libraryNotifier.reorderPadsInFolder(
+                                      effectiveFolderId,
+                                      oldIndex,
+                                      index,
+                                    );
+                                  }
+                                },
+                                builder: (context, candidateData, _) {
+                                  final tile = PadTile(
+                                    pad: pad,
+                                    voice: voice,
+                                    density: density,
+                                    isEditMode: true,
+                                    isDropTarget: candidateData.isNotEmpty,
+                                    onTap: () =>
+                                        showPadEditorSheet(context, pad: pad),
+                                  );
+                                  return Draggable<String>(
+                                    data: pad.id,
+                                    feedback: Material(
+                                      color: Colors.transparent,
+                                      elevation: 8,
+                                      borderRadius: BorderRadius.circular(16),
+                                      child: SizedBox(
+                                        width: tileWidth,
+                                        height: mainAxisExtent,
+                                        child: Opacity(
+                                          opacity: 0.9,
+                                          child: PadTile(
+                                            pad: pad,
+                                            voice: voice,
+                                            density: density,
+                                            isEditMode: true,
+                                            onTap: () {},
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                    childWhenDragging: Opacity(
+                                      opacity: 0.35,
+                                      child: tile,
+                                    ),
+                                    child: tile,
+                                  );
+                                },
+                              );
+                            },
+                          );
+                        },
                       ),
-                      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                        crossAxisCount: crossAxisCount,
-                        mainAxisExtent: mainAxisExtent,
-                        crossAxisSpacing: spacing,
-                        mainAxisSpacing: spacing,
-                      ),
-                      itemCount: visiblePads.length,
-                      itemBuilder: (context, index) {
-                        final pad = visiblePads[index];
-                        final voice = playbackState.activeByPad[pad.id];
-                        return PadTile(
-                          pad: pad,
-                          voice: voice,
-                          density: density,
-                          onTap: () => playbackNotifier.tapPad(pad),
-                        );
-                      },
-                    );
-                  },
-                ),
               ),
               NowPlayingBar(
                 activeEntries: activeEntries,
@@ -210,6 +317,134 @@ class _SoundboardScreenState extends ConsumerState<SoundboardScreen> {
           );
         },
       ),
+    );
+  }
+}
+
+class _EditModeBanner extends StatelessWidget {
+  const _EditModeBanner({
+    required this.onAddFolder,
+    required this.onManageFolders,
+  });
+
+  final VoidCallback onAddFolder;
+  final VoidCallback onManageFolders;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+
+    return Material(
+      color: colorScheme.tertiaryContainer,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          border: Border(bottom: BorderSide(color: colorScheme.outlineVariant)),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 2, 4, 2),
+          child: Row(
+            children: <Widget>[
+              ExcludeSemantics(
+                child: Icon(
+                  Icons.edit_note,
+                  size: 20,
+                  color: colorScheme.onTertiaryContainer,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Edit Mode',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.titleSmall?.copyWith(
+                    fontWeight: FontWeight.w700,
+                    color: colorScheme.onTertiaryContainer,
+                  ),
+                ),
+              ),
+              IconButton(
+                key: const Key('add_folder_button'),
+                tooltip: 'Add folder',
+                constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
+                icon: Icon(
+                  Icons.create_new_folder_outlined,
+                  color: colorScheme.onTertiaryContainer,
+                ),
+                onPressed: onAddFolder,
+              ),
+              IconButton(
+                key: const Key('manage_folders_button'),
+                tooltip: 'Manage folders',
+                constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
+                icon: Icon(
+                  Icons.folder_copy_outlined,
+                  color: colorScheme.onTertiaryContainer,
+                ),
+                onPressed: onManageFolders,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _FolderChip extends StatelessWidget {
+  const _FolderChip({
+    required this.folder,
+    required this.selected,
+    required this.isShortViewport,
+    required this.isEditMode,
+    required this.padsById,
+    required this.onSelected,
+    required this.onPadDropped,
+  });
+
+  final SoundFolder folder;
+  final bool selected;
+  final bool isShortViewport;
+  final bool isEditMode;
+  final Map<String, SoundPad> padsById;
+  final VoidCallback onSelected;
+  final ValueChanged<String> onPadDropped;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+
+    Widget buildChip({required bool highlighted}) {
+      return ChoiceChip(
+        label: Text(folder.name),
+        selected: selected,
+        side: highlighted
+            ? BorderSide(color: colorScheme.primary, width: 2)
+            : null,
+        materialTapTargetSize: MaterialTapTargetSize.padded,
+        labelPadding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+        padding: EdgeInsets.symmetric(
+          horizontal: 10,
+          vertical: isShortViewport ? 8 : 13,
+        ),
+        onSelected: (_) => onSelected(),
+      );
+    }
+
+    if (!isEditMode) {
+      return buildChip(highlighted: false);
+    }
+
+    return DragTarget<String>(
+      onWillAcceptWithDetails: (details) {
+        final draggedPad = padsById[details.data];
+        return draggedPad != null && draggedPad.folderId != folder.id;
+      },
+      onAcceptWithDetails: (details) => onPadDropped(details.data),
+      builder: (context, candidateData, _) {
+        return buildChip(highlighted: candidateData.isNotEmpty);
+      },
     );
   }
 }

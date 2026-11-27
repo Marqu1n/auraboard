@@ -88,7 +88,7 @@ class SoundPad {
     required this.folderId,
     required this.label,
     required this.colorValue,
-    required this.icon,
+    this.icon,
     required this.audioPath,
     this.isAsset = false,
     required this.type,
@@ -104,7 +104,7 @@ class SoundPad {
   final String folderId;
   final String label;
   final int colorValue;
-  final PadIcon icon;
+  final PadIcon? icon;
   final String audioPath;
   final bool isAsset;
   final PadType type;
@@ -121,6 +121,7 @@ class SoundPad {
     String? label,
     int? colorValue,
     PadIcon? icon,
+    bool clearIcon = false,
     String? audioPath,
     bool? isAsset,
     PadType? type,
@@ -139,7 +140,7 @@ class SoundPad {
       folderId: folderId ?? this.folderId,
       label: label ?? this.label,
       colorValue: colorValue ?? this.colorValue,
-      icon: icon ?? this.icon,
+      icon: clearIcon ? null : (icon ?? this.icon),
       audioPath: audioPath ?? this.audioPath,
       isAsset: isAsset ?? this.isAsset,
       type: type ?? this.type,
@@ -164,7 +165,7 @@ class SoundPad {
       'folderId': folderId,
       'label': label,
       'colorValue': colorValue,
-      'icon': icon.name,
+      'icon': icon?.name,
       'audioPath': audioPath,
       'isAsset': isAsset,
       'type': type.name,
@@ -178,12 +179,13 @@ class SoundPad {
   }
 
   factory SoundPad.fromJson(Map<String, dynamic> json) {
+    final rawIcon = json['icon'];
     return SoundPad(
       id: json['id'] as String,
       folderId: json['folderId'] as String,
       label: json['label'] as String,
       colorValue: (json['colorValue'] as num).toInt(),
-      icon: PadIcon.values.byName(json['icon'] as String),
+      icon: rawIcon != null ? PadIcon.values.byName(rawIcon as String) : null,
       audioPath: json['audioPath'] as String,
       isAsset: json['isAsset'] as bool? ?? false,
       type: PadType.values.byName(json['type'] as String),

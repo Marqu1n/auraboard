@@ -4,11 +4,15 @@ import 'package:auraboard/audio/soloud_audio_engine.dart';
 import 'package:auraboard/data/library_repository.dart';
 import 'package:auraboard/domain/audio_engine.dart';
 import 'package:auraboard/domain/clock.dart';
+import 'package:auraboard/domain/library_operations.dart';
 import 'package:auraboard/domain/models.dart';
 import 'package:auraboard/domain/playback_engine.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:uuid/uuid.dart';
 
 export 'package:auraboard/domain/playback_engine.dart' show PlaybackState;
+
+const Uuid _uuid = Uuid();
 
 /// Provides the active [AudioEngine] implementation.
 final audioEngineProvider = Provider<AudioEngine>((ref) {
@@ -29,6 +33,25 @@ final libraryRepositoryProvider = Provider<LibraryRepository>((ref) {
   return InMemoryLibraryRepository();
 });
 
+/// Controls whether the soundboard is in explicit Edit Mode (`true`) or safe
+/// Play Mode (`false`, default).
+final editModeProvider = NotifierProvider<EditModeController, bool>(
+  EditModeController.new,
+);
+
+class EditModeController extends Notifier<bool> {
+  @override
+  bool build() => false;
+
+  void setEditMode(bool enabled) {
+    state = enabled;
+  }
+
+  void toggle() {
+    state = !state;
+  }
+}
+
 /// Loads and manages the persisted [SoundLibrary].
 final libraryControllerProvider =
     AsyncNotifierProvider<LibraryController, SoundLibrary>(
@@ -41,15 +64,115 @@ class LibraryController extends AsyncNotifier<SoundLibrary> {
     return ref.read(libraryRepositoryProvider).load();
   }
 
-  /// Updates persisted [BoardSettings] in memory and storage.
-  Future<void> updateSettings(BoardSettings settings) async {
+  Future<SoundLibrary> _mutate(
+    SoundLibrary Function(SoundLibrary current) transform,
+  ) async {
     final current = state.asData?.value ?? await future;
-    if (current.settings == settings) {
-      return;
+    final updated = transform(current);
+    if (updated == current) {
+      return updated;
     }
-    final updated = current.copyWith(settings: settings);
     state = AsyncData<SoundLibrary>(updated);
     await ref.read(libraryRepositoryProvider).save(updated);
+    return updated;
+  }
+
+  /// Updates persisted [BoardSettings] in memory and storage.
+  Future<void> updateSettings(BoardSettings settings) async {
+    await _mutate(
+      (current) => current.settings == settings
+          ? current
+          : current.copyWith(settings: settings),
+    );
+  }
+
+  /// Creates and persists a new folder with a generated unique ID.
+  Future<void> createFolder(String name) async {
+    final id = 'folder_${_uuid.v4()}';
+    await _mutate(
+      (current) => LibraryOperations.createFolder(current, id: id, name: name),
+    );
+  }
+
+  /// Renames the folder matching [folderId] and persists the change.
+  Future<void> renameFolder(String folderId, String newName) async {
+    await _mutate(
+      (current) => LibraryOperations.renameFolder(
+        current,
+        folderId: folderId,
+        newName: newName,
+      ),
+    );
+  }
+
+  /// Reorders folders from [oldIndex] to target [newIndex] and persists.
+  Future<void> reorderFolders(int oldIndex, int newIndex) async {
+    await _mutate(
+      (current) =>
+          LibraryOperations.reorderFolders(current, oldIndex, newIndex),
+    );
+  }
+
+  /// Deletes [folderId] (optionally moving its pads to [movePadsToFolderId])
+  /// and persists the library. Any deleted active pads are automatically
+  /// stopped by [PlaybackController] observing library updates.
+  Future<void> deleteFolder(
+    String folderId, {
+    String? movePadsToFolderId,
+  }) async {
+    await _mutate(
+      (library) => LibraryOperations.deleteFolder(
+        library,
+        folderId: folderId,
+        movePadsToFolderId: movePadsToFolderId,
+      ),
+    );
+  }
+
+  /// Reorders pads within [folderId] and persists.
+  Future<void> reorderPadsInFolder(
+    String folderId,
+    int oldIndex,
+    int newIndex,
+  ) async {
+    await _mutate(
+      (current) => LibraryOperations.reorderPadsInFolder(
+        current,
+        folderId: folderId,
+        oldIndex: oldIndex,
+        newIndex: newIndex,
+      ),
+    );
+  }
+
+  /// Moves [padId] to the end of [targetFolderId] and persists.
+  Future<void> movePadToFolder(String padId, String targetFolderId) async {
+    await _mutate(
+      (current) => LibraryOperations.movePadToFolder(
+        current,
+        padId: padId,
+        targetFolderId: targetFolderId,
+      ),
+    );
+  }
+
+  /// Updates an existing pad and persists. [PlaybackController] automatically
+  /// clears any playback error state if the pad's audio source changed.
+  Future<void> updatePad(SoundPad updatedPad) async {
+    await _mutate(
+      (library) => LibraryOperations.updatePad(library, updatedPad),
+    );
+  }
+
+  /// Removes [padId] from the library and persists. [PlaybackController]
+  /// automatically stops playback if the deleted pad is currently active.
+  Future<void> deletePad(String padId) async {
+    await _mutate((current) => LibraryOperations.deletePad(current, padId));
+  }
+
+  /// Appends [pads] to their respective folders and persists.
+  Future<void> addPads(List<SoundPad> pads) async {
+    await _mutate((current) => LibraryOperations.addPads(current, pads));
   }
 }
 
@@ -93,13 +216,34 @@ class PlaybackController extends Notifier<PlaybackState> {
       previous,
       next,
     ) {
-      final nextSettings = next.asData?.value.settings;
-      final prevSettings = previous?.asData?.value.settings;
-      if (nextSettings != null &&
-          nextSettings != prevSettings &&
-          nextSettings != engine.settings &&
-          !isBuildDisposed) {
-        unawaited(engine.updateSettings(nextSettings));
+      if (isBuildDisposed) {
+        return;
+      }
+      final prevLibrary = previous?.asData?.value;
+      final nextLibrary = next.asData?.value;
+      if (nextLibrary == null) {
+        return;
+      }
+
+      if (nextLibrary.settings != prevLibrary?.settings &&
+          nextLibrary.settings != engine.settings) {
+        unawaited(engine.updateSettings(nextLibrary.settings));
+      }
+
+      if (prevLibrary != null) {
+        final nextPadsById = <String, SoundPad>{
+          for (final pad in nextLibrary.pads) pad.id: pad,
+        };
+        for (final prevPad in prevLibrary.pads) {
+          final nextPad = nextPadsById[prevPad.id];
+          if (nextPad == null) {
+            unawaited(engine.stopPad(prevPad.id));
+            engine.clearPadError(prevPad.id);
+          } else if (nextPad.audioPath != prevPad.audioPath ||
+              nextPad.isAsset != prevPad.isAsset) {
+            engine.clearPadError(prevPad.id);
+          }
+        }
       }
     });
 
